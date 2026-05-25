@@ -17,7 +17,6 @@
 config/                 Runtime settings
 src/                    Application source code
 static/                 Web UI assets
-tests/                  Pytest test suite
 notebooks/              Training and experiment notebooks
 models/                 Local model artifacts, ignored by git
 data/                   Local datasets, ignored by git
@@ -39,14 +38,6 @@ Open:
 
 ```text
 http://127.0.0.1:7861/
-```
-
-## Tests
-
-```powershell
-$env:VIRTUAL_ENV=(Resolve-Path .venv).Path
-$env:PATH="$env:VIRTUAL_ENV\Scripts;$env:PATH"
-uv run --active pytest tests\test_privacy_controls.py tests\test_step2_step3.py -q
 ```
 
 ## Privacy And Repository Hygiene

@@ -45,6 +45,16 @@ kaggle.json
 # 報告輸出
 reports/
 
+# Local development / repair artifacts
+tests/
+test_*.py
+fix_*.py
+debug_nb.py
+update_func.py
+upgrade_stable.py
+architecture.md
+CONSTITUTION.md
+
 # Python
 __pycache__/
 .pytest_cache/
