@@ -14,95 +14,85 @@
 ## Project Structure
 
 ```text
-.env.example                    Local environment template, no real secrets
-.gitignore                      Ignore rules for secrets, logs, datasets, audio, and model artifacts
-README.md                       Project overview and runtime guide
-requirements.txt                Python dependency list
+AI_Voice/
+├── .env.example                 # 本機環境變數範本，不包含真實密鑰
+├── .gitignore                   # 排除 secrets、logs、datasets、audio、model artifacts
+├── README.md                    # 專案說明、架構流程與啟動方式
+├── requirements.txt             # Python 依賴清單
+├── config/
+│   └── settings.py              # 全域設定、模型路徑與 runtime 參數
+├── src/
+│   ├── gui.py                   # FastAPI Web server、REST API、靜態檔案掛載
+│   ├── main.py                  # CLI / orchestrator 形式的端到端偵測流程
+│   ├── models.py                # 音訊特徵、轉錄、Agent 結果、融合結果 dataclasses
+│   ├── privacy.py               # 轉錄隱私保護、metadata 最小化、上傳副檔名清理
+│   ├── step1_preprocessing/
+│   │   ├── audio_loader.py      # 音訊載入與取樣率正規化
+│   │   ├── denoiser.py          # 降噪與 SNR 估算
+│   │   └── feature_extractor.py # MFCC、mel、韻律、wav2vec2 特徵萃取
+│   ├── step2_transcription/
+│   │   ├── whisper_transcriber.py # Whisper 語音轉文字
+│   │   └── text_converter.py      # 文字清理與繁體中文正規化
+│   ├── step3_agents/
+│   │   ├── base_agent.py        # Agent 共用結果封裝
+│   │   ├── voiceprint_agent.py  # 聲紋與深偽語音風險分析
+│   │   ├── semantic_agent.py    # BERT 詐騙語義分析
+│   │   └── memory_agent.py      # Sentence-BERT + FAISS 記憶比對
+│   ├── step4_fusion/
+│   │   └── se_attention_fusion.py # SE-Attention 動態權重融合
+│   ├── step5_report/
+│   │   └── report_generator.py  # 分析報告產生支援
+│   └── utils/
+│       ├── exceptions.py        # 共用例外型別
+│       └── logger.py            # 共用 logger 設定
+├── static/
+│   ├── index.html               # Web UI HTML
+│   ├── app.js                   # 上傳、進度、結果、歷史紀錄互動
+│   └── style.css                # Web UI 樣式
+└── notebooks/
+    ├── 01_bert_fraud_training.ipynb        # 語義模型訓練流程
+    ├── 02_voiceprint_training.ipynb        # 聲紋模型訓練流程
+    └── 03_memory_and_fusion_training.ipynb # 記憶庫與融合模型訓練流程
 
-config/
-  settings.py                   Central runtime paths and model configuration
-
-src/
-  gui.py                        FastAPI web server, REST endpoints, static UI mounting
-  main.py                       CLI-style orchestrator for end-to-end detection
-  models.py                     Shared dataclasses for audio features, transcripts, agent results, fusion results
-  privacy.py                    Transcript redaction, metadata minimization, safe upload suffix helpers
-
-  step1_preprocessing/
-    audio_loader.py             Audio loading and sample-rate normalization
-    denoiser.py                 Noise reduction and SNR estimation
-    feature_extractor.py        MFCC, mel, prosody, and wav2vec2 feature extraction
-
-  step2_transcription/
-    whisper_transcriber.py      Whisper-based speech-to-text transcription
-    text_converter.py           Text cleanup and Simplified-to-Traditional Chinese conversion
-
-  step3_agents/
-    base_agent.py               Common agent result helpers
-    voiceprint_agent.py         Acoustic and deepfake voiceprint risk analysis
-    semantic_agent.py           BERT-based fraud semantics analysis
-    memory_agent.py             FAISS/Sentence-BERT memory matching with redacted metadata
-
-  step4_fusion/
-    se_attention_fusion.py      SE-Attention fusion of agent scores into final risk
-
-  step5_report/
-    report_generator.py         Report generation support
-
-  utils/
-    exceptions.py               Shared exception types
-    logger.py                   Shared logger setup
-
-static/
-  index.html                    Web UI shell
-  app.js                        Browser-side upload, progress, result, and history interactions
-  style.css                     Web UI styling
-
-notebooks/
-  01_bert_fraud_training.ipynb  Semantic model training workflow
-  02_voiceprint_training.ipynb  Voiceprint model training workflow
-  03_memory_and_fusion_training.ipynb
-                                Memory index and fusion model training workflow
-
-Local-only, ignored by git:
-  models/                       Model artifacts and FAISS indexes
-  data/                         Local datasets
-  logs/                         Runtime logs
-  metadata.json                 Raw local training metadata
-  uploaded audio files          WAV/MP3/M4A/FLAC/OGG
+本地忽略路徑:
+├── models/                       # 模型 artifacts 與 FAISS index
+├── data/                         # 本地資料集
+├── logs/                         # runtime logs
+├── metadata.json                 # 原始本地訓練 metadata
+└── uploaded audio files           # WAV / MP3 / M4A / FLAC / OGG
 ```
 
 ## Architecture Flow
 
 ```mermaid
 flowchart TD
-    U["User uploads audio in Web UI"] --> UI["static/index.html + static/app.js"]
-    UI --> API["FastAPI endpoint POST /api/analyze<br/>src/gui.py"]
+    U["使用者在 Web UI 上傳通話音訊"] --> UI["前端介面<br/>static/index.html + static/app.js"]
+    UI --> API["FastAPI 分析端點<br/>POST /api/analyze<br/>src/gui.py"]
 
-    API --> TMP["Temporary audio file<br/>deleted in finally"]
-    TMP --> LDR["AudioLoader<br/>load and normalize audio"]
-    LDR --> DENOISE["Denoiser<br/>noise reduction + SNR"]
-    DENOISE --> FEAT["FeatureExtractor<br/>MFCC / mel / prosody / wav2vec2"]
+    API --> TMP["暫存音訊檔<br/>finally 區塊確保清理"]
+    TMP --> LDR["音訊載入<br/>AudioLoader<br/>讀取並正規化取樣率"]
+    LDR --> DENOISE["音訊降噪<br/>Denoiser<br/>降低背景噪音並估算 SNR"]
+    DENOISE --> FEAT["聲學特徵萃取<br/>FeatureExtractor<br/>MFCC / mel / 韻律 / wav2vec2"]
 
-    DENOISE --> ASR["WhisperTranscriber<br/>speech-to-text"]
-    ASR --> TXT["TextConverter<br/>cleanup + zh-TW normalization"]
+    DENOISE --> ASR["語音轉文字<br/>WhisperTranscriber"]
+    ASR --> TXT["文字整理<br/>TextConverter<br/>清理文字並轉為台灣繁體"]
 
-    FEAT --> VAGENT["VoiceprintAgent<br/>prosody + deepfake signal"]
-    TXT --> SAGENT["SemanticAgent<br/>BERT fraud category signal"]
-    TXT --> MAGENT["MemoryAgent<br/>Sentence-BERT + FAISS similarity"]
+    FEAT --> VAGENT["聲紋 Agent<br/>VoiceprintAgent<br/>韻律異常與深偽語音訊號"]
+    TXT --> SAGENT["語義 Agent<br/>SemanticAgent<br/>BERT 詐騙語義分類"]
+    TXT --> MAGENT["記憶 Agent<br/>MemoryAgent<br/>Sentence-BERT + FAISS 相似案例比對"]
 
-    VAGENT --> FUSION["SEAttentionFusion<br/>dynamic weighted risk score"]
+    VAGENT --> FUSION["融合判決<br/>SEAttentionFusion<br/>動態權重整合三個 Agent"]
     SAGENT --> FUSION
     MAGENT --> FUSION
 
-    FUSION --> RESPONSE["JSON response<br/>risk, probability, agent details, transcript"]
+    FUSION --> RESPONSE["API 回應<br/>風險等級、詐騙機率、Agent 細節、當次轉錄"]
     RESPONSE --> UI
 
-    TXT --> PRIVACY["privacy.py<br/>hash + length only for persistent metadata"]
-    PRIVACY --> QUEUE["Background memory write queue"]
-    QUEUE --> MEMORY["models/memory<br/>FAISS index + redacted metadata<br/>ignored by git"]
+    TXT --> PRIVACY["隱私保護<br/>privacy.py<br/>長期 metadata 只存 hash 與文字長度"]
+    PRIVACY --> QUEUE["背景寫入佇列<br/>避免阻塞分析 API"]
+    QUEUE --> MEMORY["本地長期記憶庫<br/>models/memory<br/>FAISS index + 去識別 metadata<br/>不進 Git"]
 
-    MEMORY --> HISTORY["GET /api/history<br/>redacted history only"]
+    MEMORY --> HISTORY["歷史紀錄 API<br/>GET /api/history<br/>只回傳遮罩後摘要"]
     HISTORY --> UI
 ```
 
