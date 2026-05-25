@@ -1,0 +1,82 @@
+# === AI_Voice .gitignore ===
+
+# 模型檔案（太大不適合版控）
+models/
+*.pt
+*.pkl
+*.index
+*.bin
+*.onnx
+*.h5
+*.tar.gz
+
+# 資料集
+data/
+metadata.json
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+
+# Secrets / local environment
+.env
+.env.*
+.envrc
+secrets/
+*.secret
+*.secrets
+*secret*
+*token*
+*credential*
+*credentials*
+*api_key*
+*api-key*
+*apikey*
+client_secret*.json
+service-account*.json
+service_account*.json
+kaggle.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 報告輸出
+reports/
+
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日誌
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Kaggle / Colab 暫存
+*.kaggle/
