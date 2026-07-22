@@ -79,7 +79,13 @@ class ScamAnalyzer:
         clean = text.strip()
         meaningful = re.sub(r"\s|[^\w\u4e00-\u9fff]", "", clean)
         if len(meaningful) < 6:
-            return ScamAnalysis(None, "資料不足", [NORMAL_TYPE], status="insufficient_data")
+            return ScamAnalysis(
+                None,
+                "資料不足",
+                [NORMAL_TYPE],
+                safety_actions=list(self.DEFAULT_ACTIONS),
+                status="insufficient_data",
+            )
 
         evidence: list[dict[str, object]] = []
         categories: list[str] = []

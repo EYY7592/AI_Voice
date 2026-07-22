@@ -45,7 +45,7 @@ class BertRuntime:
         model_inputs = {name: value.to(self.device) for name, value in encoded.items()}
         with torch.no_grad():
             logits = self.model(**model_inputs).logits
-            probabilities = torch.softmax(logits, dim=-1)[:, 1].detach().cpu().tolist()
+            probabilities = torch.softmax(logits, dim=-1)[:, 0].detach().cpu().tolist()
 
         windows = [
             {

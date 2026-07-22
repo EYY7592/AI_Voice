@@ -36,11 +36,12 @@ class AudioLoader:
         self.target_sr = target_sr
         logger.info(f"AudioLoader 初始化完成，目標取樣率: {target_sr}Hz")
 
-    def load(self, file_path: str) -> tuple[np.ndarray, int]:
+    def load(self, file_path: str, max_duration: float | None = None) -> tuple[np.ndarray, int]:
         """載入音頻檔案並重取樣為目標取樣率的單聲道
 
         Args:
             file_path: 音頻檔案路徑（支援 WAV/MP3/FLAC/OGG/M4A/WMA）
+            max_duration: 最多解碼秒數；用於阻止超長壓縮音訊耗盡資源
 
         Returns:
             tuple: (audio_array, sample_rate)
@@ -70,7 +71,8 @@ class AudioLoader:
                 str(path),
                 sr=self.target_sr,
                 mono=True,  # 強制轉為單聲道
-                dtype=np.float32
+                dtype=np.float32,
+                duration=max_duration,
             )
             logger.info(
                 f"成功載入音頻: {path.name}, "
@@ -81,6 +83,13 @@ class AudioLoader:
 
         except Exception as e:
             raise AudioLoadError(f"載入音頻失敗 ({path.name}): {e}") from e
+
+    def probe_duration(self, file_path: str) -> float | None:
+        """從容器 metadata 讀取長度；不支援的格式交由有限長度解碼判定。"""
+        try:
+            return float(sf.info(file_path).duration)
+        except (RuntimeError, TypeError, ValueError):
+            return None
 
     def segment(
         self,
