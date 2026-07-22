@@ -1,39 +1,23 @@
-# 智慧語音詐騙檢測工具 — 依賴清單
-# AI_Voice Project Requirements
+# ScamLens-TW localhost runtime
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9
 
-# === 音頻處理 ===
-librosa>=0.10.0          # 音頻載入與特徵萃取
-noisereduce>=3.0.0       # 語音降噪（Spectral Gating）
-soundfile>=0.12.0        # 音頻讀寫
-praat-parselmouth>=0.4.0 # 韻律特徵提取（Jitter/Shimmer/HNR）
+# Local text analysis and correction
+torch>=2.0.0
+transformers>=4.36.0
+opencc-python-reimplemented>=0.1.7
 
-# === 語音轉錄 ===
-openai-whisper>=20231117 # Whisper 離線 ASR
+# Local OCR
+easyocr>=1.7.2,<2
 
-# === 深度學習框架 ===
-torch>=2.0.0             # PyTorch
-transformers>=4.36.0     # HuggingFace 模型（Wav2vec2, BERT）
-datasets>=2.16.0         # HuggingFace 資料集
+# Local speech-to-text
+openai-whisper>=20231117
+librosa>=0.10.0
+noisereduce>=3.0.0
+soundfile>=0.12.0
+numpy>=1.24.0
 
-# === NLP 與文字處理 ===
-opencc-python-reimplemented>=0.1.7  # 繁簡轉換
-sentence-transformers>=2.2.0        # 文本嵌入（記憶系統）
-
-# === 向量檢索 ===
-faiss-cpu>=1.7.0         # FAISS 相似度搜尋（記憶系統）
-
-# === 傳統機器學習 ===
-scikit-learn>=1.3.0      # ML 工具
-lightgbm>=4.0.0          # 韻律分析分類器
-numpy>=1.24.0            # 數值計算
-pandas>=2.0.0            # 資料處理
-
-# === GUI ===
-fastapi>=0.115.0                         # Web API 框架
-uvicorn>=0.30.0                          # ASGI 伺服器
-python-multipart>=0.0.9                  # 檔案上傳支援
-matplotlib>=3.7.0                        # 波形視覺化（未來用）
-
-# === 測試 ===
-pytest>=7.0.0            # 測試框架
-pytest-cov>=4.0.0        # 測試覆蓋率
+# Verification
+pytest>=7.0.0
+httpx>=0.27.0

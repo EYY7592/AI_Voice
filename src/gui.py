@@ -1,297 +1,207 @@
-"""
-AI_Voice 智慧語音詐騙檢測 — Web Server (FastAPI)
-==================================================
-提供 REST API 和靜態檔案伺服，作為自定義 Web UI 的後端。
-"""
-import json
+"""ScamLens-TW localhost Web API。"""
+from __future__ import annotations
+
 import time
-import tempfile
-import traceback
-import queue
-import threading
-import uuid
 from pathlib import Path
+from typing import Any
 
-import numpy as np
-import uvicorn
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import FileResponse
 
-from src.step1_preprocessing.audio_loader import AudioLoader
-from src.step1_preprocessing.denoiser import Denoiser
-from src.step1_preprocessing.feature_extractor import FeatureExtractor
-from src.models import (
-    AgentResult,
-    FusionResult,
-    TranscriptionResult,
-    TranscriptionSegment,
-)
-from src.utils.logger import setup_logger
 from config.settings import settings
-from src.step2_transcription.whisper_transcriber import WhisperTranscriber
-from src.step3_agents.semantic_agent import SemanticAgent
-from src.step3_agents.voiceprint_agent import VoiceprintAgent
-from src.step3_agents.memory_agent import MemoryAgent
-from src.step4_fusion.se_attention_fusion import SEAttentionFusion
-from src.privacy import (
-    build_private_case_metadata,
-    safe_upload_suffix,
-    summarize_history_metadata,
+from src.bert_runtime import BertRuntime
+from src.media_extractors import (
+    AUDIO_SUFFIXES,
+    IMAGE_SUFFIXES,
+    MAX_AUDIO_BYTES,
+    MAX_IMAGE_BYTES,
+    AudioTextExtractor,
+    EasyOcrReader,
 )
+from src.scam_analysis import ScamAnalyzer
+from src.text_correction import TextCorrector
+from src.utils.logger import setup_logger
 
-logger = setup_logger("ai_voice.gui", level="INFO")
 
-# ========== 初始化模組 ==========
-audio_loader = AudioLoader(target_sr=16000)
-denoiser = Denoiser(prop_decrease=0.8)
-# 啟用 Wav2vec2 以支援深度特徵
-feature_extractor = FeatureExtractor(
-    n_mfcc=40,
-    n_mels=128,
-    use_wav2vec2=True,
-    wav2vec2_model_path=settings.agent.voiceprint_wav2vec2_model
-)
+ROOT_DIR = Path(__file__).resolve().parent.parent
+STATIC_DIR = ROOT_DIR / "static"
+DISCLAIMER = "此分數是未經台灣真實 gold set 校準的風險指標，不是詐騙機率或事實認定。"
+IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
+AUDIO_MIME_TYPES = {
+    "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp4", "audio/x-m4a",
+    "audio/flac", "audio/x-flac", "audio/ogg", "application/ogg",
+}
+logger = setup_logger("scamlens.gui", level="INFO")
 
-# 使用 base 模型兼顧展演速度與準確度
-transcriber = WhisperTranscriber(model_size="base")
 
-semantic_agent = SemanticAgent(model_path=settings.agent.semantic_model)
-semantic_agent.load_model()
+class LazyBertRuntime:
+    def __init__(self, model_path: str) -> None:
+        self.model_path = model_path
+        self._runtime: BertRuntime | None = None
 
-voiceprint_agent = VoiceprintAgent(
-    prosody_model_path=settings.agent.voiceprint_prosody_model,
-    deepfake_model_path=settings.agent.voiceprint_deepfake_model
-)
-voiceprint_agent.load_model()
+    def predict_details(self, text: str) -> dict[str, object]:
+        if self._runtime is None:
+            self._runtime = BertRuntime.load(self.model_path)
+        return self._runtime.predict_details(text)
 
-memory_agent = MemoryAgent(
-    index_path=settings.agent.memory_index_path,
-    meta_path=settings.agent.memory_meta_path,
-    embedding_model=settings.agent.memory_embedding_model,
-)
-memory_agent.load_model()
 
-fusion_engine = SEAttentionFusion(model_path=settings.fusion.model_path)
-fusion_engine.load_model()
-
-# ========== FastAPI App ==========
-app = FastAPI(title="智慧語音詐騙檢測系統", version="3.0.0")
-
-# 靜態檔案
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-# ========== 非同步記憶庫寫入 worker ==========
-memory_write_queue = queue.Queue()
-
-def memory_worker():
-    while True:
-        try:
-            item = memory_write_queue.get()
-            if item is None:
-                break
-                
-            case_id = item.get("id")
-            text = item.get("text", "")
-            fraud_type = item.get("fraud_type", "未知")
-            
-            # 寫入前檢查字數
-            if len(text.strip()) > 5:
-                # 取得編碼
-                embedding = memory_agent._encode(text)
-                memory_agent.persistent_memory.insert(
-                    embedding,
-                    build_private_case_metadata(case_id, text, fraud_type),
-                )
-                memory_agent.save()
-                logger.info(f"💾 [背景寫入] 成功將通話分析 {case_id[-6:]} 寫入 FAISS 長期防詐庫")
-            
-            memory_write_queue.task_done()
-        except Exception as e:
-            logger.error(f"[背景寫入] 發生錯誤: {traceback.format_exc()}")
-
-# 啟動背景執行緒 (deamon=True 隨主程式結束)
-worker_thread = threading.Thread(target=memory_worker, daemon=True)
-worker_thread.start()
-
-@app.get("/")
-async def index():
-    """首頁"""
-    html_path = STATIC_DIR / "index.html"
-    with open(html_path, "r", encoding="utf-8") as f:
-        html_content = f.read()
-        
-    # 動態注入時間戳以破解 JS/CSS 快取
-    t = int(time.time())
-    html_content = html_content.replace('app.js?v=3.1', f'app.js?t={t}')
-    html_content = html_content.replace('app.js', f'app.js?t={t}')
-    html_content = html_content.replace('style.css', f'style.css?t={t}')
-    
-    return HTMLResponse(
-        content=html_content,
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        }
+def create_app(
+    *,
+    bert_runtime: Any | None = None,
+    corrector: Any | None = None,
+    image_reader: Any | None = None,
+    audio_reader: Any | None = None,
+) -> FastAPI:
+    app = FastAPI(title="ScamLens-TW 通用型防詐檢測工具", version="4.0.0")
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    analyzer = ScamAnalyzer(
+        medium_risk_score=settings.analysis.medium_risk_score,
+        high_risk_score=settings.analysis.high_risk_score,
     )
 
-
-@app.post("/api/analyze")
-async def analyze_audio(
-    audio: UploadFile = File(...),
-    language: str = Form(""),
-):
-    """核心分析 API
-
-    接收音頻檔案，執行 Step 1~5 分析流程並回傳 JSON 結果。
-    """
-    start_time = time.time()
-    tmp_path = None
-
-    try:
-        # === 儲存上傳檔案 ===
-        suffix = safe_upload_suffix(audio.filename)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            content = await audio.read()
-            tmp.write(content)
-            tmp_path = tmp.name
-
-        logger.info(f"收到音頻: suffix={suffix}, size={len(content)/1024:.1f}KB")
-
-        # === Step 1: 預處理 ===
-        audio_raw, sr = audio_loader.load(tmp_path)
-        audio_clean = denoiser.denoise(audio_raw, sr)
-        snr = denoiser.estimate_snr(audio_raw, sr)
-        features = feature_extractor.extract_all(audio_clean, sr)
-        features.snr_estimate = snr
-        duration = len(audio_raw) / sr
-
-        # === Step 2: 語音轉錄 (A/B角色) ===
-        logger.info("開始 Whisper 語音轉錄...")
-        # 若使用者未特別指定語言，預設視為中文 (zh) 提速
-        transcript = transcriber.transcribe(
-            audio_clean, 
-            sr, 
-            language=language or "zh"
+    @app.get("/")
+    async def index() -> HTMLResponse:
+        return HTMLResponse(
+            (STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
-        transcript_text = transcript.text
-        logger.info(f"轉錄完成: chars={len(transcript_text)}")
 
-        # === Step 3: 三 Agent 分析 ===
-        voiceprint = voiceprint_agent.analyze(features)
-        semantic = semantic_agent.analyze(transcript)
-        memory = memory_agent.analyze(transcript)
-        agent_results = [voiceprint, semantic, memory]
+    @app.post("/api/analyze")
+    async def analyze(
+        text: str | None = Form(default=None),
+        upload: UploadFile | None = File(default=None),
+        correction_confirmed: bool = Form(default=False),
+        source_type: str | None = Form(default=None),
+    ) -> JSONResponse:
+        provided = int(bool(text and text.strip())) + int(upload is not None)
+        if provided != 1:
+            return JSONResponse(
+                {"detail": "一次必須且只能提供文字、圖片或語音其中一種輸入。"},
+                status_code=422,
+            )
 
-        # === Step 4: 融合 ===
-        fusion = fusion_engine.fuse(agent_results)
+        started = time.perf_counter()
+        input_type = source_type if source_type in {"image", "audio"} else "text"
+        original_text = text or ""
+        extraction: dict[str, object] = {}
+        if upload is not None:
+            suffix = Path(upload.filename or "").suffix.lower()
+            if suffix in IMAGE_SUFFIXES:
+                allowed_mime_types = IMAGE_MIME_TYPES
+                max_bytes = MAX_IMAGE_BYTES
+            elif suffix in AUDIO_SUFFIXES:
+                allowed_mime_types = AUDIO_MIME_TYPES
+                max_bytes = MAX_AUDIO_BYTES
+            else:
+                return JSONResponse({"detail": "不支援的檔案格式。"}, status_code=415)
+            if upload.content_type not in allowed_mime_types:
+                return JSONResponse({"detail": "副檔名與媒體類型不相符。"}, status_code=415)
+            content = await upload.read(max_bytes + 1)
+            if len(content) > max_bytes:
+                return JSONResponse({"detail": "上傳檔案超過大小限制。"}, status_code=413)
+            try:
+                if suffix in IMAGE_SUFFIXES:
+                    if image_reader is None:
+                        return JSONResponse({"detail": "本機 OCR 模型尚未準備。"}, status_code=503)
+                    input_type = "image"
+                    extraction = image_reader.extract(content)
+                elif suffix in AUDIO_SUFFIXES:
+                    if audio_reader is None:
+                        return JSONResponse({"detail": "本機 Whisper 模型尚未準備。"}, status_code=503)
+                    input_type = "audio"
+                    extraction = audio_reader.extract(content, suffix)
+            except ValueError as exc:
+                return JSONResponse({"detail": str(exc)}, status_code=413)
+            except Exception as exc:
+                logger.warning("%s 文字擷取不可用：%s", input_type, type(exc).__name__)
+                return JSONResponse({"detail": f"本機 {input_type} 文字擷取失敗。"}, status_code=503)
+            original_text = str(extraction.pop("text", ""))
 
-        # === Step 5: 組裝回應 ===
-        elapsed = time.time() - start_time
+        if len(original_text) > 20_000:
+            return JSONResponse({"detail": "文字不可超過 20,000 字。"}, status_code=413)
 
-        # 韻律特徵
-        p = features.prosody
-        prosody = {
-            "Jitter": p.jitter,
-            "Shimmer": p.shimmer,
-            "HNR (dB)": round(p.hnr, 2),
-            "F0 均值 (Hz)": round(p.f0_mean, 1),
-            "F0 標準差": round(p.f0_std, 1),
-            "F0 範圍": round(p.f0_range, 1),
-            "語速": round(p.speaking_rate, 1),
-            "停頓次數": len(p.pause_durations),
+        analysis_text = original_text
+        correction_status = "confirmed" if correction_confirmed else "disabled"
+        corrections: list[dict[str, object]] = []
+        if not correction_confirmed and corrector is not None:
+            proposal = corrector.suggest(analysis_text)
+            suggested_text = str(proposal["suggested_text"])
+            corrections = list(proposal.get("changes", []))
+            correction_status = str(proposal.get("model_status", "unavailable"))
+            if suggested_text != analysis_text:
+                return JSONResponse({
+                    "status": "needs_confirmation",
+                    "input_type": input_type,
+                    "original_text": original_text,
+                    "suggested_text": suggested_text,
+                    "analysis_text": None,
+                    "corrections": corrections,
+                    "extraction": extraction,
+                    "risk_score": None,
+                    "risk_level": "等待確認",
+                    "categories": [],
+                    "evidence": [],
+                    "safety_actions": [],
+                    "analysis_windows": 0,
+                    "bert_evidence": [],
+                    "model_status": {"bert": "not_run", "correction": correction_status},
+                    "elapsed": round(time.perf_counter() - started, 3),
+                    "disclaimer": DISCLAIMER,
+                })
+            analysis_text = suggested_text
+
+        bert_details: dict[str, object] = {
+            "probability": None,
+            "window_count": 0,
+            "highest_risk_windows": [],
         }
+        bert_status = "disabled"
+        if bert_runtime is not None:
+            try:
+                bert_details = bert_runtime.predict_details(analysis_text)
+                bert_status = "ready"
+            except Exception as exc:
+                logger.warning("BERT 輔助分析不可用：%s", type(exc).__name__)
+                bert_status = "unavailable"
 
-        logger.info(
-            f"分析完成: {fusion.risk_level}, "
-            f"P={fusion.final_probability:.3f}, 耗時 {elapsed:.2f}s"
+        probability = bert_details.get("probability")
+        result = analyzer.analyze_text(
+            analysis_text,
+            bert_probability=float(probability) if probability is not None else None,
+            window_count=int(bert_details.get("window_count", 0)),
         )
-        
-        # 配發一個專屬 Case ID
-        current_case_id = str(uuid.uuid4())
-        
-        # 將結果自動塞入背景寫入隊列 (自動變成長期記憶)
-        memory_write_queue.put({
-            "id": current_case_id,
-            "text": transcript_text,
-            "fraud_type": f"{fusion.risk_level}風險 ({fusion.final_probability:.1%})"
-        })
-
         return JSONResponse({
-            "id": current_case_id,
-            "fraud_probability": fusion.final_probability,
-            "risk_level": fusion.risk_level,
-            "duration": duration,
-            "snr": snr,
-            "elapsed": elapsed,
-            "transcript": transcript_text,
-            "agents": [
-                {
-                    "name": r.agent_name,
-                    "fraud_probability": r.fraud_probability,
-                    "confidence": r.confidence,
-                    "signal_quality": r.signal_quality,
-                    "explanation": r.explanation,
-                }
-                for r in agent_results
-            ],
-            "weights": fusion.dynamic_weights,
-            "prosody": prosody,
+            "status": result.status,
+            "input_type": input_type,
+            "original_text": original_text,
+            "analysis_text": analysis_text,
+            "corrections": corrections,
+            "extraction": extraction,
+            "risk_score": result.risk_score,
+            "risk_level": result.risk_level,
+            "categories": result.categories,
+            "evidence": result.evidence,
+            "safety_actions": result.safety_actions,
+            "analysis_windows": result.window_count,
+            "bert_evidence": bert_details.get("highest_risk_windows", []),
+            "model_status": {"bert": bert_status, "correction": correction_status},
+            "elapsed": round(time.perf_counter() - started, 3),
+            "disclaimer": DISCLAIMER,
         })
 
-    except Exception as e:
-        logger.error(f"分析失敗: {traceback.format_exc()}")
-        return JSONResponse(
-            {"detail": str(e)},
-            status_code=500,
-        )
-    finally:
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
+    return app
 
 
-@app.get("/api/history")
-async def get_history():
-    """取得所有長期記憶庫中的案例紀錄"""
-    try:
-        # 直接讀取 PersistentMemory 中的 metadata，反轉確保最新在上
-        metadata = summarize_history_metadata(
-            reversed(memory_agent.persistent_memory._metadata)
-        )
-        return JSONResponse({"history": metadata})
-    except Exception as e:
-        logger.error(f"獲取歷史紀錄失敗: {e}")
-        return JSONResponse({"detail": str(e)}, status_code=500)
+app = create_app(
+    bert_runtime=LazyBertRuntime(settings.models.bert),
+    corrector=TextCorrector(settings.models.correction),
+    image_reader=EasyOcrReader(settings.models.ocr),
+    audio_reader=AudioTextExtractor(model_path=settings.models.whisper),
+)
 
 
-@app.delete("/api/history/{case_id}")
-async def delete_history(case_id: str):
-    """手動刪除長期記憶庫中的特定案例"""
-    try:
-        success = memory_agent.delete_case(case_id)
-        if success:
-            logger.info(f"使用者已手動刪除記憶庫案例: {case_id}")
-            return JSONResponse({"success": True})
-        else:
-            return JSONResponse({"success": False, "detail": "找不到該案例 ID"}, status_code=404)
-    except Exception as e:
-        logger.error(f"刪除歷史紀錄失敗: {e}")
-        return JSONResponse({"detail": str(e)}, status_code=500)
-
-
-
-# ========== 啟動入口 ==========
 if __name__ == "__main__":
-    print("═" * 50)
-    print("  智慧語音詐騙檢測系統 v3.0")
-    print("  http://localhost:7860")
-    print("═" * 50)
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=7860,
-        log_level="info",
-    )
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=7861)

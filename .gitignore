@@ -47,8 +47,6 @@ kaggle.json
 reports/
 
 # Local development / repair artifacts
-tests/
-test_*.py
 fix_*.py
 debug_nb.py
 update_func.py
