@@ -24,8 +24,10 @@ def _write_classes(path) -> None:
     path.write_text(CLASS_TEXT, encoding="utf-8")
 
 
-def _write_rows(path, prefix: str) -> None:
+def _write_rows(path, prefix: str, *, include_official_header: bool = False) -> None:
     rows = []
+    if include_official_header:
+        rows.append("Label_id\tText\n")
     for label in (0, 1):
         for index in range(10):
             rows.append(f"{label}\t{prefix}软件内容 {label}-{index}\n")
@@ -57,6 +59,22 @@ def test_prepare_chifraud_dataset_produces_paired_stratified_splits(tmp_path) ->
     assert {record["split"] for record in records if record["year"] == 2023} == {"train", "validation", "test"}
     assert all(record["text_simplified"] and record["text_traditional"] for record in records)
     assert any("軟體" in record["text_traditional"] for record in records)
+
+
+def test_prepare_chifraud_dataset_accepts_official_file_header(tmp_path) -> None:
+    source = tmp_path / "dataset"
+    source.mkdir()
+    _write_rows(source / "ChiFraud_train.csv", "train", include_official_header=True)
+    _write_rows(source / "ChiFraud_t2022.csv", "test2022", include_official_header=True)
+    _write_rows(source / "ChiFraud_t2023.csv", "test2023", include_official_header=True)
+    _write_classes(source / "class.txt")
+
+    output = tmp_path / "prepared"
+    manifest = prepare_chifraud_dataset(source, output, source_revision="fixture-v1", seed=42)
+
+    records = [json.loads(line) for line in (output / "records.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert manifest["raw_records"] == 60
+    assert all(record["text_simplified"] != "Text" for record in records)
 
 
 def test_prepare_chifraud_dataset_rejects_incomplete_class_list(tmp_path) -> None:

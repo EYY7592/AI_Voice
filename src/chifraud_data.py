@@ -103,6 +103,8 @@ def prepare_chifraud_dataset(
         file_records = 0
         with path.open("r", encoding="utf-8", newline="") as handle:
             for line_number, row in enumerate(csv.reader(handle, delimiter="\t"), start=1):
+                if line_number == 1 and tuple(column.strip() for column in row[:2]) == ("Label_id", "Text"):
+                    continue
                 if len(row) < 2:
                     raise ValueError(f"{filename}:{line_number} 缺少標籤或文字。")
                 try:
