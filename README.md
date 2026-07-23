@@ -9,7 +9,7 @@
 - 純文字：LINE、簡訊、社群貼文或 Gmail 內文。
 - 截圖：EasyOCR 本機辨識繁體中文與英文，單張最多 10 MB。
 - 語音：現有 Whisper `base` 本機轉錄，最長 5 分鐘。
-- 修正：小型 MacBERT 只提出錯字、標點與斷句候選；使用者確認後才生效。
+- 修正：純文字貼上直接分析原文；只有 OCR／語音轉錄文字才由小型 MacBERT 提出錯字、標點與斷句候選，且需使用者確認才生效。
 - 長文字：BERT 使用 256-token 視窗與 64-token 重疊，保留最高風險窗口。
 - 隱私：不保存輸入、分析歷史或原始內容 log，暫存語音在成功與失敗後都清除。
 - 降級：BERT 或修正模型不可用時，透明規則仍可分析；模型不會在分析請求中偷偷下載。
@@ -45,6 +45,33 @@ uv pip install -r requirements.txt
 ```
 
 `prepare_models.py` 是唯一會下載新模型的步驟。一般啟動與分析只讀取 `models/` 中的本機權重。
+
+## ChiFraud BERT 重訓
+
+正式流程會從固定版本的 `google-bert/bert-base-chinese` 做乾淨二元分類 fine-tuning，不沿用現有分類頭。資料先稽核官方 `class.txt` 與 11 類分布，再產生簡體原文及繁體轉譯的成對 split；同一正規化文字不可跨 split。2022、2023 都會進入 train／validation／test，test 不參與 checkpoint、溫度、門檻或超參數選擇。
+
+Kaggle 的主要入口是 `notebooks/02_chifraud_dual_script_experiment.ipynb`；`01_bert_fraud_training.ipynb` 僅保留為舊版實驗紀錄，不應作為候選產物來源。CLI 等價流程：
+
+```powershell
+.venv\Scripts\python.exe -m src.chifraud_data <ChiFraud\dataset> artifacts\chifraud_prepared --source-revision <commit-sha> --seed 42
+.venv\Scripts\python.exe -m scripts.run_chifraud_experiment artifacts\chifraud_prepared artifacts\chifraud_experiment --base-model google-bert/bert-base-chinese --base-revision <commit-sha> --seeds 42
+```
+
+實驗會各自訓練簡體與繁體候選，並讓兩個模型都在簡體／繁體 test view、2022／2023 年度上交叉驗收。主要硬門檻為每年詐騙 Recall 至少 90%；正常樣本中風險誤報率不得高於 12%、高風險誤報率不得高於 5%。若單一 seed 無法判定，使用全新 output 以 `--seeds 42 43 44` 重跑。
+
+先驗證下載回來的候選目錄：
+
+```powershell
+.venv\Scripts\python.exe -m scripts.promote_bert_candidate <candidate-dir>
+```
+
+確認 `selection_report.json` 已選出該候選且驗證成功後，才執行 localhost 切換：
+
+```powershell
+.venv\Scripts\python.exe -m scripts.promote_bert_candidate <candidate-dir> --selection-report <experiment-dir>\selection_report.json --target models\bert_fraud --promote
+```
+
+既有模型會保留為 `models\bert_fraud.previous`；若該目錄已存在，腳本會拒絕覆寫，要求先人工確認。候選輸出、模型權重與原始資料皆不提交 Git。
 
 ## 啟動
 

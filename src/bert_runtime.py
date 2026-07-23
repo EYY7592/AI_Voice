@@ -12,6 +12,22 @@ class BertRuntime:
         self.tokenizer = tokenizer
         self.model = model
         self.device = device
+        id2label = getattr(getattr(model, "config", None), "id2label", {})
+        fraud_ids = [int(label_id) for label_id, label in id2label.items() if str(label).upper() == "FRAUD"]
+        if len(fraud_ids) != 1:
+            raise ValueError("BERT 模型必須明確且唯一地定義 FRAUD 標籤。")
+        self.fraud_label_id = fraud_ids[0]
+        label2id = getattr(model.config, "label2id", {})
+        if label2id.get("FRAUD") != self.fraud_label_id:
+            raise ValueError("BERT 模型的 id2label 與 label2id 標籤方向衝突。")
+        calibration = getattr(model.config, "scamlens_calibration", None)
+        if not isinstance(calibration, dict):
+            raise ValueError("BERT 模型缺少 ScamLens 校準設定。")
+        self.temperature = float(calibration.get("temperature", 0.0))
+        self.medium_threshold = float(calibration.get("medium_threshold", 0.0))
+        self.high_threshold = float(calibration.get("high_threshold", 0.0))
+        if self.temperature <= 0 or not 0 < self.medium_threshold < self.high_threshold < 1:
+            raise ValueError("BERT 模型的校準溫度或風險門檻無效。")
 
     @classmethod
     def load(cls, model_path: str | Path, *, device: str | None = None) -> "BertRuntime":
@@ -44,8 +60,8 @@ class BertRuntime:
         input_ids = encoded["input_ids"]
         model_inputs = {name: value.to(self.device) for name, value in encoded.items()}
         with torch.no_grad():
-            logits = self.model(**model_inputs).logits
-            probabilities = torch.softmax(logits, dim=-1)[:, 0].detach().cpu().tolist()
+            logits = self.model(**model_inputs).logits / self.temperature
+            probabilities = torch.softmax(logits, dim=-1)[:, self.fraud_label_id].detach().cpu().tolist()
 
         windows = [
             {
@@ -57,9 +73,23 @@ class BertRuntime:
         highest = sorted(windows, key=lambda item: item["score"], reverse=True)[:3]
         return {
             "probability": max(probabilities, default=0.0),
+            "model_risk_score": self._model_risk_score(max(probabilities, default=0.0)),
             "window_count": len(windows),
             "highest_risk_windows": highest,
         }
+
+    def _model_risk_score(self, probability: float) -> int:
+        probability = max(0.0, min(1.0, probability))
+        anchors = (
+            (0.0, 0),
+            (self.medium_threshold, 40),
+            (self.high_threshold, 70),
+            (1.0, 90),
+        )
+        for (lower_p, lower_score), (upper_p, upper_score) in zip(anchors, anchors[1:]):
+            if probability <= upper_p:
+                return round(lower_score + (upper_score - lower_score) * (probability - lower_p) / (upper_p - lower_p))
+        return 90
 
     def predict(self, text: str) -> tuple[float, int]:
         details = self.predict_details(text)

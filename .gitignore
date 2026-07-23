@@ -36,6 +36,8 @@ secrets/
 *apikey*
 client_secret*.json
 service-account*.json
+# 可重現產生的資料準備、候選模型與實驗報告
+artifacts/
 service_account*.json
 kaggle.json
 *.pem

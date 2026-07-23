@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -21,15 +22,58 @@ class OneWindowTokenizer:
         return "測試窗口"
 
 
-class FraudLabelZeroModel:
+class DeclaredFraudLabelModel:
+    config = SimpleNamespace(
+        id2label={0: "NORMAL", 1: "FRAUD"},
+        label2id={"NORMAL": 0, "FRAUD": 1},
+        scamlens_calibration={
+            "temperature": 1.0,
+            "medium_threshold": 0.4,
+            "high_threshold": 0.8,
+        },
+    )
+
     def __call__(self, **kwargs):
         del kwargs
         return type("Output", (), {"logits": torch.tensor([[5.0, 1.0]])})()
 
 
-def test_bert_uses_label_zero_as_fraud_score() -> None:
-    result = BertRuntime(OneWindowTokenizer(), FraudLabelZeroModel()).predict_details("測試")
-    assert result["probability"] > 0.9
+def test_bert_uses_declared_fraud_label() -> None:
+    result = BertRuntime(OneWindowTokenizer(), DeclaredFraudLabelModel()).predict_details("測試")
+    assert result["probability"] < 0.1
+
+
+class ConflictingLabelModel:
+    config = SimpleNamespace(
+        id2label={0: "NORMAL", 1: "FRAUD"},
+        label2id={"NORMAL": 1, "FRAUD": 0},
+    )
+
+
+def test_bert_rejects_conflicting_label_mapping() -> None:
+    with pytest.raises(ValueError, match="衝突"):
+        BertRuntime(OneWindowTokenizer(), ConflictingLabelModel())
+
+
+class CalibratedHighRiskModel:
+    config = SimpleNamespace(
+        id2label={0: "NORMAL", 1: "FRAUD"},
+        label2id={"NORMAL": 0, "FRAUD": 1},
+        scamlens_calibration={
+            "temperature": 1.0,
+            "medium_threshold": 0.4,
+            "high_threshold": 0.8,
+        },
+    )
+
+    def __call__(self, **kwargs):
+        del kwargs
+        return type("Output", (), {"logits": torch.tensor([[0.0, 2.1972246]])})()
+
+
+def test_bert_returns_calibrated_model_risk_score() -> None:
+    result = BertRuntime(OneWindowTokenizer(), CalibratedHighRiskModel()).predict_details("測試")
+    assert result["model_risk_score"] == 80
 
 
 class TooLongLoader:

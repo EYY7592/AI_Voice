@@ -12,11 +12,19 @@ class FixedCorrector:
             "model_status": "ready",
         }
 
+class FixedOcrReader:
+    def extract(self, content: bytes) -> dict:
+        assert content == b"image-bytes"
+        return {"text": "今天新情很好但對方要求匯款", "confidence": 0.9}
+
 
 def test_correction_is_proposed_before_it_can_change_analysis_text():
-    client = TestClient(create_app(corrector=FixedCorrector()))
+    client = TestClient(create_app(corrector=FixedCorrector(), image_reader=FixedOcrReader()))
 
-    proposed = client.post("/api/analyze", data={"text": "今天新情很好但對方要求匯款"})
+    proposed = client.post(
+        "/api/analyze",
+        files={"upload": ("message.png", b"image-bytes", "image/png")},
+    )
 
     assert proposed.status_code == 200
     proposal = proposed.json()

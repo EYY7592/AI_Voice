@@ -75,7 +75,7 @@ class ScamAnalyzer:
         "改用自己查到的官方管道查證；有疑慮可聯絡 165 反詐騙諮詢專線。",
     )
 
-    def analyze_text(self, text: str, *, bert_probability: float | None = None, window_count: int = 0) -> ScamAnalysis:
+    def analyze_text(self, text: str, *, bert_probability: float | None = None, bert_risk_score: int | None = None, window_count: int = 0) -> ScamAnalysis:
         clean = text.strip()
         meaningful = re.sub(r"\s|[^\w\u4e00-\u9fff]", "", clean)
         if len(meaningful) < 6:
@@ -105,9 +105,13 @@ class ScamAnalyzer:
         pressure = [signal for signal in self.PRESSURE_SIGNALS if signal in clean]
         evidence.extend({"category": "施壓話術", "text": signal, "kind": "壓力"} for signal in pressure)
         points += min(16, 8 * len(pressure))
-        if bert_probability is not None:
-            points += round(max(0.0, min(1.0, bert_probability)) * 20)
-        score = min(100, points)
+        strong_pattern_score = (
+            self.high_risk_score if any(item["kind"] == "行為模式" for item in evidence) else 0
+        )
+        rule_score = min(100, max(points, strong_pattern_score))
+        model_score = max(0, min(90, bert_risk_score or 0))
+        agreement = 10 if rule_score >= self.medium_risk_score and model_score >= self.medium_risk_score else 0
+        score = min(100, max(rule_score, model_score) + agreement)
         categories = categories or [NORMAL_TYPE]
         actions = [self.ACTIONS[item] for item in categories if item in self.ACTIONS]
         actions.extend(action for action in self.DEFAULT_ACTIONS if action not in actions)

@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -67,6 +67,10 @@ def create_app(
             headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
         )
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)
+
     @app.post("/api/analyze")
     async def analyze(
         text: str | None = Form(default=None),
@@ -124,7 +128,7 @@ def create_app(
         analysis_text = original_text
         correction_status = "confirmed" if correction_confirmed else "disabled"
         corrections: list[dict[str, object]] = []
-        if not correction_confirmed and corrector is not None:
+        if input_type != "text" and not correction_confirmed and corrector is not None:
             proposal = corrector.suggest(analysis_text)
             suggested_text = str(proposal["suggested_text"])
             corrections = list(proposal.get("changes", []))
@@ -153,6 +157,7 @@ def create_app(
 
         bert_details: dict[str, object] = {
             "probability": None,
+            "model_risk_score": None,
             "window_count": 0,
             "highest_risk_windows": [],
         }
@@ -166,9 +171,11 @@ def create_app(
                 bert_status = "unavailable"
 
         probability = bert_details.get("probability")
+        model_risk_score = bert_details.get("model_risk_score")
         result = analyzer.analyze_text(
             analysis_text,
             bert_probability=float(probability) if probability is not None else None,
+            bert_risk_score=int(model_risk_score) if model_risk_score is not None else None,
             window_count=int(bert_details.get("window_count", 0)),
         )
         return JSONResponse({
