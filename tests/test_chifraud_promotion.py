@@ -2,6 +2,7 @@ import json
 import hashlib
 
 import pytest
+import torch
 
 
 def _write_candidate(path, *, status="passed") -> None:
@@ -27,7 +28,12 @@ def _write_candidate(path, *, status="passed") -> None:
         "medium_threshold": 0.4,
         "high_threshold": 0.8,
     }
-    BertForSequenceClassification(config).save_pretrained(model_dir)
+    model = BertForSequenceClassification(config)
+    with torch.no_grad():
+        model.classifier.weight.zero_()
+        model.classifier.bias[0] = -5.0
+        model.classifier.bias[1] = 5.0
+    model.save_pretrained(model_dir)
     artifact_files = []
     for artifact_path in sorted(item for item in model_dir.rglob("*") if item.is_file()):
         artifact_files.append(

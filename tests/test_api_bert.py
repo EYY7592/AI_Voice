@@ -89,3 +89,23 @@ def test_api_does_not_add_agreement_when_model_stays_below_medium() -> None:
     result = response.json()
     assert result["risk_score"] == 44
     assert result["risk_level"] == "中風險"
+
+
+class UnavailableBertRuntime:
+    def predict_details(self, text: str) -> dict:
+        raise RuntimeError("模型載入失敗")
+
+
+def test_api_falls_back_to_rules_when_bert_is_unavailable() -> None:
+    response = TestClient(create_app(bert_runtime=UnavailableBertRuntime())).post(
+        "/api/analyze",
+        data={"text": "請提供驗證碼"},
+    )
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["model_status"]["bert"] == "unavailable"
+    assert result["risk_level"] == "高風險"
+    assert result["categories"]
+    assert result["evidence"]
+    assert result["safety_actions"]

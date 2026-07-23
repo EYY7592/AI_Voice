@@ -26,14 +26,40 @@ def _validate_model_dir(model_dir: Path) -> dict[str, object]:
         raise ValueError("候選模型未通過 256-token／64-token overlap 滑動窗口 smoke test。")
     if not 0.0 <= float(long_smoke["probability"]) <= 1.0 or not 0 <= int(long_smoke["model_risk_score"]) <= 90:
         raise ValueError("候選模型 smoke 分數超出契約範圍。")
-    response = TestClient(create_app(bert_runtime=runtime)).post(
-        "/api/analyze",
-        data={"text": "請提供驗證碼"},
+    probe_details = max(
+        (
+            runtime.predict_details(text)
+            for text in (
+                "恭喜中獎，請先支付保證金領取獎金",
+                "客服通知帳戶異常，請依指示提供資料",
+                "穩賺投資方案，現在加入即可快速獲利",
+            )
+        ),
+        key=lambda details: int(details["model_risk_score"]),
     )
-    payload = response.json()
+    model_score = int(probe_details["model_risk_score"])
+    if model_score < 70:
+        raise ValueError("候選模型未能對 promotion 詐騙 probe 產生模型單獨高風險。")
+
+    class FrozenCandidateRuntime:
+        def predict_details(self, text: str) -> dict[str, object]:
+            return probe_details
+
+    client = TestClient(create_app(bert_runtime=FrozenCandidateRuntime()))
+    model_only = client.post("/api/analyze", data={"text": "這是一段沒有固定關鍵詞的可疑邀請內容"})
+    agreement = client.post("/api/analyze", data={"text": "投資高報酬保證獲利立即參加"})
+    payload = model_only.json()
     required_fields = {"risk_score", "risk_level", "categories", "evidence", "safety_actions"}
-    if response.status_code != 200 or payload.get("risk_level") != "高風險" or not required_fields <= payload.keys():
-        raise ValueError("候選模型未通過 localhost 統一分析 API smoke test。")
+    if (
+        model_only.status_code != 200
+        or payload.get("risk_score") != model_score
+        or payload.get("risk_level") != "高風險"
+        or not required_fields <= payload.keys()
+    ):
+        raise ValueError("候選模型未通過 localhost 模型單獨高風險 API smoke test。")
+    expected_agreement = min(100, max(44, model_score) + 10)
+    if agreement.status_code != 200 or agreement.json().get("risk_score") != expected_agreement:
+        raise ValueError("候選模型未通過 localhost 規則與模型一致性加分 API smoke test。")
     return {
         "fraud_label_id": runtime.fraud_label_id,
         "calibration": dict(model.config.scamlens_calibration),

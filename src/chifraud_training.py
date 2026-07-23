@@ -141,11 +141,20 @@ def evaluate_candidate(
 
     subtypes: dict[str, dict[str, float | int]] = {}
     for subtype_id in sorted({record["subtype_id"] for record in normalized if record["label"] == 1}):
-        subtype_records = [record for record in normalized if record["subtype_id"] == subtype_id]
-        recall = sum(record["probability"] >= medium_threshold for record in subtype_records) / len(subtype_records)
-        subtype_f1 = 2 * recall / (1 + recall) if recall else 0.0
-        subtypes[str(subtype_id)] = {"samples": len(subtype_records), "recall": recall, "f1": subtype_f1}
-        if len(subtype_records) >= 50 and recall < 0.70:
+        subtype_positives = [record for record in normalized if record["subtype_id"] == subtype_id]
+        subtype_vs_normal = [
+            record for record in normalized
+            if record["label"] == 0 or record["subtype_id"] == subtype_id
+        ]
+        metrics = _binary_metrics(subtype_vs_normal, medium_threshold)
+        recall = float(metrics["fraud_recall"])
+        subtypes[str(subtype_id)] = {
+            "samples": len(subtype_positives),
+            "recall": recall,
+            "precision_vs_normal": metrics["fraud_precision"],
+            "f1_vs_normal": metrics["fraud_f1"],
+        }
+        if len(subtype_positives) >= 50 and recall < 0.70:
             failures.append(f"詐騙子類 {subtype_id} Recall 低於 70%。")
 
     return {
