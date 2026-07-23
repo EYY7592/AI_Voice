@@ -14,6 +14,7 @@ import unicodedata
 import opencc
 
 
+CHIFRAUD_SOURCE_URL = "https://github.com/xuemingxxx/ChiFraud"
 SOURCE_FILES = {
     "ChiFraud_train.csv": 2022,
     "ChiFraud_t2022.csv": 2022,
@@ -151,15 +152,24 @@ def prepare_chifraud_dataset(
         "".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n" for item in records),
         encoding="utf-8",
     )
+    split_id_sha256 = {
+        split: hashlib.sha256(
+            ("\n".join(sorted(str(item["record_id"]) for item in records if item["split"] == split)) + "\n").encode()
+        ).hexdigest()
+        for split in ("train", "validation", "test")
+    }
     manifest: dict[str, object] = {
         "dataset": "ChiFraud",
         "source_revision": source_revision,
         "files": files,
+        "schema_version": 1,
+        "source_url": CHIFRAUD_SOURCE_URL,
         "seed": seed,
         "split_ratio": {"train": 0.8, "validation": 0.1, "test": 0.1},
         "opencc": {"config": "s2twp", "version": version("opencc-python-reimplemented")},
         "raw_records": raw_records,
         "deduplicated_records": len(records),
+        "split_id_sha256": split_id_sha256,
         "duplicate_records": raw_records - len(records),
         "counts": [
             {"year": year, "split": split, "subtype": subtype, "count": count}

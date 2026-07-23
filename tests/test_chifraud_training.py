@@ -134,7 +134,7 @@ def test_train_candidate_runs_tiny_end_to_end_experiment(tmp_path) -> None:
 
 
 
-def test_equivalent_script_candidates_select_traditional_model() -> None:
+def test_equivalent_first_seed_requests_two_additional_seeds() -> None:
     results = []
     for candidate, offset in (("simplified", 0.004), ("traditional", 0.0)):
         for view in ("simplified", "traditional"):
@@ -152,9 +152,31 @@ def test_equivalent_script_candidates_select_traditional_model() -> None:
 
     decision = select_script_candidate(results)
 
-    assert decision["status"] == "selected"
+    assert decision["status"] == "additional_seeds_required"
+    assert decision["additional_runs_per_candidate"] == 2
+
+
+def test_equivalent_three_seed_average_selects_traditional_model() -> None:
+    results = []
+    for seed in (42, 43, 44):
+        for candidate, offset in (("simplified", 0.004), ("traditional", 0.0)):
+            for view in ("simplified", "traditional"):
+                for year in (2022, 2023):
+                    results.append(
+                        {
+                            "candidate": candidate,
+                            "view": view,
+                            "year": year,
+                            "seed": seed,
+                            "fraud_recall": 0.91 + offset,
+                            "macro_f1": 0.90 + offset,
+                        }
+                    )
+
+    decision = select_script_candidate(results)
     assert decision["candidate"] == "traditional"
-    assert decision["reason"] == "equivalent"
+    assert decision["promotion_seed"] == 42
+    assert decision["comparison_summary"]
 
 
 def test_candidate_artifact_can_be_evaluated_on_a_script_view(tmp_path) -> None:

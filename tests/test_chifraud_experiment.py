@@ -37,8 +37,8 @@ def test_dual_script_experiment_trains_and_cross_evaluates_both_candidates(tmp_p
 
     assert len(calls["train"]) == 2
     assert len(calls["evaluate"]) == 4
-    assert report["selection"]["candidate"] == "traditional"
-    assert report["selection"]["reason"] == "equivalent"
+    assert report["selection"]["status"] == "additional_seeds_required"
+    assert report["selection"]["additional_runs_per_candidate"] == 2
     saved = json.loads((tmp_path / "experiment" / "selection_report.json").read_text(encoding="utf-8"))
     assert saved["base_revision"] == "pinned-sha"
 
@@ -60,3 +60,40 @@ def test_dual_script_experiment_stops_selection_when_candidate_fails(tmp_path, m
 
     assert report["selection"]["status"] == "failed"
     assert report["cross_evaluations"] == []
+
+
+def test_dual_script_experiment_rejects_failed_cross_view_acceptance(tmp_path, monkeypatch) -> None:
+    from src import chifraud_experiment
+
+    def fake_train(prepared_dir, output_dir, **kwargs):
+        model_dir = output_dir / "model"
+        model_dir.mkdir(parents=True)
+        return {"status": "passed", "script_view": kwargs["script_view"], "seed": kwargs["seed"]}
+
+    def fake_evaluate(model_dir, prepared_dir, **kwargs):
+        failed = model_dir.parent.name.startswith("traditional") and kwargs["script_view"] == "simplified"
+        return {
+            "passed": not failed,
+            "years": {
+                "2022": {"fraud_recall": 0.91, "macro_f1": 0.90},
+                "2023": {"fraud_recall": 0.91, "macro_f1": 0.90},
+            },
+        }
+
+    monkeypatch.setattr(chifraud_experiment, "train_candidate", fake_train)
+    monkeypatch.setattr(chifraud_experiment, "evaluate_candidate_artifact", fake_evaluate)
+
+    report = chifraud_experiment.run_dual_script_experiment(
+        tmp_path / "prepared",
+        tmp_path / "experiment",
+        base_model="google-bert/bert-base-chinese",
+        base_revision="pinned-sha",
+        seeds=(42,),
+    )
+
+    assert report["selection"] == {
+        "status": "failed",
+        "candidate": None,
+        "reason": "cross_view_acceptance_failed",
+    }
+    assert len(report["failed_cross_evaluations"]) == 1

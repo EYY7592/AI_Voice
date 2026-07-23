@@ -76,6 +76,30 @@ def test_bert_returns_calibrated_model_risk_score() -> None:
     assert result["model_risk_score"] == 80
 
 
+
+
+def test_simplified_candidate_converts_only_runtime_model_input() -> None:
+    class RecordingTokenizer(OneWindowTokenizer):
+        def __init__(self) -> None:
+            self.seen_text = None
+
+        def __call__(self, text, **kwargs):
+            self.seen_text = text
+            return super().__call__(text, **kwargs)
+
+    model = DeclaredFraudLabelModel()
+    model.config = SimpleNamespace(
+        id2label={0: "NORMAL", 1: "FRAUD"},
+        label2id={"NORMAL": 0, "FRAUD": 1},
+        scamlens_calibration={"temperature": 1.0, "medium_threshold": 0.4, "high_threshold": 0.8},
+        scamlens_script_view="simplified",
+    )
+    tokenizer = RecordingTokenizer()
+    runtime = BertRuntime(tokenizer, model)
+
+    runtime.predict_details("詐騙帳戶")
+
+    assert tokenizer.seen_text == "诈骗帐户"
 class TooLongLoader:
     def probe_duration(self, path: str) -> float:
         del path

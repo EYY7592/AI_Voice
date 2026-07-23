@@ -1,8 +1,10 @@
 # ADR-0001：以 ChiFraud 乾淨微調建立 BERT 詐騙輔助模型
 
 > **狀態**：已接受
+> **文件版本**：v1.1
 > **日期**：2026-07-23
 > **決策者**：專案負責人
+> **作者**：ScamLens-TW 專案團隊
 > **摘要**：捨棄現有詐騙 checkpoint，從 `bert-base-chinese` 建立簡體與台灣繁體兩個候選模型；只有乾淨分類微調未達驗收標準時，才追加領域後訓練。
 
 ## 背景
@@ -10,6 +12,14 @@
 現有 BERT checkpoint 的訓練來源、標籤方向與推論契約不夠可靠。舊訓練 notebook 定義 0 為正常、1 為詐騙，但 runtime 曾固定讀取第 0 個輸出作為詐騙分數，因此既有低風險結果不能用來判定 BERT 架構失效。
 
 ChiFraud 是現階段可取得且具詐騙子類標註的大型中文詐騙資料，但以中國大陸網頁語境為主，不能代表台灣真實成效。專案目前只有台灣模擬診斷集，沒有台灣真實評估集。
+
+## 來源與查核
+
+下列來源於 2026-07-23 查核，repository 與論文交叉確認 ChiFraud 的分類與年度資料；Hugging Face 模型頁用來固定 base model 身分與 revision：
+
+- [ChiFraud 官方 repository](https://github.com/xuemingxxx/ChiFraud)
+- [ChiFraud COLING 2025 論文](https://aclanthology.org/2025.coling-main.398/)
+- [Google bert-base-chinese 模型頁](https://huggingface.co/google-bert/bert-base-chinese)
 
 ## 決策
 

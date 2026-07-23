@@ -1,4 +1,5 @@
 import json
+import hashlib
 
 import pytest
 
@@ -27,10 +28,29 @@ def _write_candidate(path, *, status="passed") -> None:
         "high_threshold": 0.8,
     }
     BertForSequenceClassification(config).save_pretrained(model_dir)
-    (path / "training_manifest.json").write_text(
-        json.dumps({"status": status, "test_used_for_selection": False, "script_view": "traditional", "seed": 42}),
-        encoding="utf-8",
-    )
+    artifact_files = []
+    for artifact_path in sorted(item for item in model_dir.rglob("*") if item.is_file()):
+        artifact_files.append(
+            {
+                "path": artifact_path.relative_to(model_dir).as_posix(),
+                "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+                "size": artifact_path.stat().st_size,
+            }
+        )
+    passing_year = {"fraud_recall": 0.90, "medium_fpr": 0.12, "high_fpr": 0.05}
+    manifest = {
+        "status": status,
+        "test_used_for_selection": False,
+        "script_view": "traditional",
+        "seed": 42,
+        "artifact_files": artifact_files,
+        "test_report": {
+            "passed": status == "passed",
+            "years": {"2022": passing_year, "2023": passing_year},
+            "subtypes": {"1": {"samples": 50, "recall": 0.70}},
+        },
+    }
+    (path / "training_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def test_validate_candidate_output_accepts_only_passed_calibrated_model(tmp_path) -> None:
@@ -71,4 +91,16 @@ def test_validate_candidate_output_rejects_candidate_not_selected_by_report(tmp_
     )
 
     with pytest.raises(ValueError, match="不是選模報告指定"):
+
         validate_candidate_output(candidate, selection_report_path=selection_report)
+
+def test_validate_candidate_output_rejects_tampered_artifact(tmp_path) -> None:
+    from src.chifraud_promotion import validate_candidate_output
+
+    candidate = tmp_path / "candidate"
+    _write_candidate(candidate)
+    config_path = candidate / "model" / "config.json"
+    config_path.write_text(config_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="hash 或大小不一致"):
+        validate_candidate_output(candidate)

@@ -54,3 +54,38 @@ def test_calibrated_bert_score_can_raise_risk_without_rule_match() -> None:
     result = response.json()
     assert result["risk_score"] == 80
     assert result["risk_level"] == "高風險"
+
+
+class FixedModelScoreRuntime:
+    def __init__(self, score: int) -> None:
+        self.score = score
+
+    def predict_details(self, text: str) -> dict:
+        return {
+            "probability": 0.5,
+            "model_risk_score": self.score,
+            "window_count": 1,
+            "highest_risk_windows": [{"text": text, "score": 0.5}],
+        }
+
+
+def test_api_adds_ten_when_rules_and_model_both_reach_medium_risk() -> None:
+    response = TestClient(create_app(bert_runtime=FixedModelScoreRuntime(40))).post(
+        "/api/analyze",
+        data={"text": "投資高報酬保證獲利立即參加"},
+    )
+
+    result = response.json()
+    assert result["risk_score"] == 54
+    assert result["risk_level"] == "中風險"
+
+
+def test_api_does_not_add_agreement_when_model_stays_below_medium() -> None:
+    response = TestClient(create_app(bert_runtime=FixedModelScoreRuntime(20))).post(
+        "/api/analyze",
+        data={"text": "投資高報酬保證獲利立即參加"},
+    )
+
+    result = response.json()
+    assert result["risk_score"] == 44
+    assert result["risk_level"] == "中風險"

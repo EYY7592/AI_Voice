@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import math
 from os import PathLike
+import platform
 from typing import Mapping, Sequence
+from statistics import fmean, pstdev
 
 
 def compute_sampling_weights(
@@ -140,7 +143,8 @@ def evaluate_candidate(
     for subtype_id in sorted({record["subtype_id"] for record in normalized if record["label"] == 1}):
         subtype_records = [record for record in normalized if record["subtype_id"] == subtype_id]
         recall = sum(record["probability"] >= medium_threshold for record in subtype_records) / len(subtype_records)
-        subtypes[str(subtype_id)] = {"samples": len(subtype_records), "recall": recall}
+        subtype_f1 = 2 * recall / (1 + recall) if recall else 0.0
+        subtypes[str(subtype_id)] = {"samples": len(subtype_records), "recall": recall, "f1": subtype_f1}
         if len(subtype_records) >= 50 and recall < 0.70:
             failures.append(f"詐騙子類 {subtype_id} Recall 低於 70%。")
 
@@ -324,6 +328,7 @@ def train_candidate(
         validation_logits, validation_labels, validation_loss = collect(validation_loader)
         temperature = fit_temperature(validation_logits, validation_labels)
         validation_records = calibrated_records(splits["validation"], validation_logits, temperature)
+        metrics: dict[str, float | int] | None = None
         try:
             thresholds = select_operating_thresholds(validation_records)
             metrics = _binary_metrics(validation_records, thresholds["medium_threshold"])
@@ -339,6 +344,9 @@ def train_candidate(
                 "train_loss": sum(train_losses) / len(train_losses),
                 "validation_loss": validation_loss,
                 "eligible_thresholds": eligible,
+                "fraud_recall": metrics["fraud_recall"] if metrics is not None else None,
+                "macro_f1": metrics["macro_f1"] if metrics is not None else None,
+                "thresholds": thresholds,
             }
         )
         if best_rank is None or rank > best_rank:
@@ -364,10 +372,12 @@ def train_candidate(
         failures.append(str(exc))
 
     test_report: dict[str, object] | None = None
+    candidate_dir: Path | None = None
     if thresholds is not None:
         model.config.id2label = {0: "NORMAL", 1: "FRAUD"}
         model.config.label2id = {"NORMAL": 0, "FRAUD": 1}
         model.config.scamlens_calibration = {"temperature": temperature, **thresholds}
+        model.config.scamlens_script_view = script_view
         candidate_dir = output / "model"
         model.save_pretrained(candidate_dir)
         tokenizer.save_pretrained(candidate_dir)
@@ -376,13 +386,25 @@ def train_candidate(
         test_report = evaluate_candidate(test_records, **thresholds)
         failures.extend(test_report["failures"])
 
+    artifact_files: list[dict[str, object]] = []
+    if candidate_dir is not None:
+        for artifact_path in sorted(path for path in candidate_dir.rglob("*") if path.is_file()):
+            digest = hashlib.sha256()
+            with artifact_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            artifact_files.append(
+                {"path": artifact_path.relative_to(candidate_dir).as_posix(), "sha256": digest.hexdigest(), "size": artifact_path.stat().st_size}
+            )
+
     manifest: dict[str, object] = {
         "status": "passed" if not failures else "failed",
         "failures": failures,
         "base_model": str(base_model),
+        "schema_version": 1,
         "base_revision": base_revision,
         "script_view": script_view,
-        "source_revision": source_manifest.get("source_revision"),
+        "data_manifest": source_manifest,
         "seed": seed,
         "max_epochs": max_epochs,
         "patience": patience,
@@ -394,6 +416,18 @@ def train_candidate(
         "label_mapping": {"NORMAL": 0, "FRAUD": 1},
         "calibration": {"temperature": temperature, **(thresholds or {})},
         "history": history,
+        "optimizer": {"name": "AdamW", "weight_decay": 0.01},
+        "scheduler": {"name": "linear_with_warmup", "warmup_ratio": 0.1},
+        "environment": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "transformers": __import__("transformers").__version__,
+            "device": selected_device,
+            "cuda_device": torch.cuda.get_device_name(0) if selected_device.startswith("cuda") else None,
+        },
+        "extension_to_12_epochs_recommended": max_epochs == 8 and len(history) == 8 and best_epoch == 8,
+        "artifact_files": artifact_files,
         "test_used_for_selection": False,
         "test_report": test_report,
     }
@@ -433,26 +467,40 @@ def select_script_candidate(results: Sequence[Mapping[str, object]]) -> dict[str
     if actual != expected or len(actual) != len(normalized):
         raise ValueError("選模結果缺少成對年度／view／seed 或包含重複項目。")
 
-    differences: list[float] = []
+    comparison_summary: list[dict[str, object]] = []
     for view in sorted(views):
         for year in (2022, 2023):
             for metric in ("fraud_recall", "macro_f1"):
-                means = {}
+                aggregates: dict[str, dict[str, float]] = {}
                 for candidate in sorted(candidates):
                     values = [
                         result[metric]
                         for result in normalized
                         if result["candidate"] == candidate and result["view"] == view and result["year"] == year
                     ]
-                    means[candidate] = sum(values) / len(values)
-                differences.append(means["simplified"] - means["traditional"])
+                    aggregates[candidate] = {"mean": fmean(values), "population_stddev": pstdev(values)}
+                comparison_summary.append(
+                    {
+                        "view": view,
+                        "year": year,
+                        "metric": metric,
+                        "simplified": aggregates["simplified"],
+                        "traditional": aggregates["traditional"],
+                        "mean_difference": aggregates["simplified"]["mean"] - aggregates["traditional"]["mean"],
+                    }
+                )
 
-    if all(abs(difference) < 0.01 for difference in differences):
-        return {"status": "selected", "candidate": "traditional", "promotion_seed": min(seeds), "reason": "equivalent", "seeds": sorted(seeds)}
+    differences = [float(item["mean_difference"]) for item in comparison_summary]
     if all(difference >= 0.01 for difference in differences):
-        return {"status": "selected", "candidate": "simplified", "promotion_seed": min(seeds), "reason": "significantly_better", "seeds": sorted(seeds)}
+        return {
+            "status": "selected", "candidate": "simplified", "promotion_seed": min(seeds),
+            "reason": "significantly_better", "seeds": sorted(seeds), "comparison_summary": comparison_summary,
+        }
     if all(difference <= -0.01 for difference in differences):
-        return {"status": "selected", "candidate": "traditional", "promotion_seed": min(seeds), "reason": "significantly_better", "seeds": sorted(seeds)}
+        return {
+            "status": "selected", "candidate": "traditional", "promotion_seed": min(seeds),
+            "reason": "significantly_better", "seeds": sorted(seeds), "comparison_summary": comparison_summary,
+        }
     if len(seeds) < 3:
         return {
             "status": "additional_seeds_required",
@@ -460,8 +508,17 @@ def select_script_candidate(results: Sequence[Mapping[str, object]]) -> dict[str
             "reason": "inconclusive",
             "additional_runs_per_candidate": 3 - len(seeds),
             "seeds": sorted(seeds),
+            "comparison_summary": comparison_summary,
         }
-    return {"status": "selected", "candidate": "traditional", "promotion_seed": min(seeds), "reason": "inconclusive_after_three_seeds", "seeds": sorted(seeds)}
+    equivalent = all(abs(difference) < 0.01 for difference in differences)
+    return {
+        "status": "selected",
+        "candidate": "traditional",
+        "promotion_seed": min(seeds),
+        "reason": "equivalent" if equivalent else "inconclusive_after_three_seeds",
+        "seeds": sorted(seeds),
+        "comparison_summary": comparison_summary,
+    }
 
 
 def evaluate_candidate_artifact(

@@ -12,14 +12,11 @@ class BertRuntime:
         self.tokenizer = tokenizer
         self.model = model
         self.device = device
-        id2label = getattr(getattr(model, "config", None), "id2label", {})
-        fraud_ids = [int(label_id) for label_id, label in id2label.items() if str(label).upper() == "FRAUD"]
-        if len(fraud_ids) != 1:
-            raise ValueError("BERT 模型必須明確且唯一地定義 FRAUD 標籤。")
-        self.fraud_label_id = fraud_ids[0]
-        label2id = getattr(model.config, "label2id", {})
-        if label2id.get("FRAUD") != self.fraud_label_id:
-            raise ValueError("BERT 模型的 id2label 與 label2id 標籤方向衝突。")
+        id2label = {int(label_id): str(label).upper() for label_id, label in getattr(model.config, "id2label", {}).items()}
+        label2id = {str(label).upper(): int(label_id) for label, label_id in getattr(model.config, "label2id", {}).items()}
+        if id2label != {0: "NORMAL", 1: "FRAUD"} or label2id != {"NORMAL": 0, "FRAUD": 1}:
+            raise ValueError("BERT 模型標籤契約必須完整且唯一地定義 0=NORMAL、1=FRAUD，且雙向設定不得衝突。")
+        self.fraud_label_id = 1
         calibration = getattr(model.config, "scamlens_calibration", None)
         if not isinstance(calibration, dict):
             raise ValueError("BERT 模型缺少 ScamLens 校準設定。")
@@ -28,6 +25,13 @@ class BertRuntime:
         self.high_threshold = float(calibration.get("high_threshold", 0.0))
         if self.temperature <= 0 or not 0 < self.medium_threshold < self.high_threshold < 1:
             raise ValueError("BERT 模型的校準溫度或風險門檻無效。")
+        self.script_view = str(getattr(model.config, "scamlens_script_view", "traditional"))
+        if self.script_view not in {"simplified", "traditional"}:
+            raise ValueError("BERT 模型的 scamlens_script_view 必須是 simplified 或 traditional。")
+        self._script_converter = None
+        if self.script_view == "simplified":
+            import opencc
+            self._script_converter = opencc.OpenCC("t2s")
 
     @classmethod
     def load(cls, model_path: str | Path, *, device: str | None = None) -> "BertRuntime":
@@ -47,6 +51,8 @@ class BertRuntime:
     def predict_details(self, text: str) -> dict[str, object]:
         import torch
 
+        if self._script_converter is not None:
+            text = self._script_converter.convert(text)
         encoded = self.tokenizer(
             text,
             max_length=256,

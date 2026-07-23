@@ -1,5 +1,10 @@
 # ScamLens-TW
 
+> **文件版本**：v4.1.0
+> **最後修改**：2026-07-23
+> **作者**：ScamLens-TW 專案團隊
+> **摘要**：localhost 圖片／文字／語音內容防詐，以及 ChiFraud BERT 可重現重訓與安全升級說明。
+
 以文字內容為核心的 localhost 防詐分析工具。一次可貼上文字、上傳一張清晰截圖，或上傳最長五分鐘的語音；圖片與語音只負責取得文字，三種入口最後使用同一套內容風險分析。
 
 輸出包含 0–100 風險分數、低／中／高風險、現有七類詐騙類型、命中話術與固定安全建議。風險分數尚未經台灣真實 gold set 校準，不是詐騙機率，也不是事實或法律認定。
@@ -48,7 +53,7 @@ uv pip install -r requirements.txt
 
 ## ChiFraud BERT 重訓
 
-正式流程會從固定版本的 `google-bert/bert-base-chinese` 做乾淨二元分類 fine-tuning，不沿用現有分類頭。資料先稽核官方 `class.txt` 與 11 類分布，再產生簡體原文及繁體轉譯的成對 split；同一正規化文字不可跨 split。2022、2023 都會進入 train／validation／test，test 不參與 checkpoint、溫度、門檻或超參數選擇。
+正式流程會從固定版本的 [`google-bert/bert-base-chinese`](https://huggingface.co/google-bert/bert-base-chinese) 做乾淨二元分類 fine-tuning，不沿用現有分類頭。資料先稽核 [ChiFraud 官方 repository](https://github.com/xuemingxxx/ChiFraud) 的 `class.txt` 與 11 類分布，並與 [COLING 2025 論文](https://aclanthology.org/2025.coling-main.398/) 交叉確認後，再產生簡體原文及繁體轉譯的成對 split。來源於 2026-07-23 查核；同一正規化文字不可跨 split。2022、2023 都會進入 train／validation／test，test 不參與 checkpoint、溫度、門檻或超參數選擇。
 
 Kaggle 的主要入口是 `notebooks/02_chifraud_dual_script_experiment.ipynb`；`01_bert_fraud_training.ipynb` 僅保留為舊版實驗紀錄，不應作為候選產物來源。CLI 等價流程：
 

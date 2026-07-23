@@ -100,9 +100,19 @@ def run_dual_script_experiment(
                             "year": year,
                             "seed": seed,
                             "fraud_recall": metrics["fraud_recall"],
+
                             "macro_f1": metrics["macro_f1"],
                         }
                     )
+
+    failed_cross_evaluations = [
+        item for item in cross_evaluations if item["report"].get("passed") is not True
+    ]
+    selection = (
+        {"status": "failed", "candidate": None, "reason": "cross_view_acceptance_failed"}
+        if failed_cross_evaluations
+        else select_script_candidate(selection_rows)
+    )
 
     return _write_report(
         output,
@@ -113,6 +123,7 @@ def run_dual_script_experiment(
             "candidate_manifests": manifests,
             "cross_evaluations": cross_evaluations,
             "selection_rows": selection_rows,
-            "selection": select_script_candidate(selection_rows),
+            "failed_cross_evaluations": failed_cross_evaluations,
+            "selection": selection,
         },
     )
