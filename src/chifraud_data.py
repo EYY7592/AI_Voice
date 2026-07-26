@@ -93,6 +93,8 @@ def prepare_chifraud_dataset(
         raise ValueError("class.txt 與預期的 ChiFraud 0–10 分類清單不一致。")
     converter = opencc.OpenCC("s2twp")
     records_by_text: dict[str, dict[str, object]] = {}
+    conflicting_texts: set[str] = set()
+    conflicting_records_dropped = 0
     files: list[dict[str, object]] = [{"name": "class.txt", "sha256": _sha256_bytes(class_path)}]
     raw_records = 0
 
@@ -119,9 +121,13 @@ def prepare_chifraud_dataset(
                 text_traditional = _normalize(converter.convert(text_simplified))
                 dedup_key = text_traditional
                 existing = records_by_text.get(dedup_key)
-                if existing is not None:
+                if dedup_key in conflicting_texts:
+                    conflicting_records_dropped += 1
+                elif existing is not None:
                     if existing["subtype_id"] != subtype_id:
-                        raise ValueError(f"正規化後的重複文字具有衝突標籤：{filename}:{line_number}")
+                        del records_by_text[dedup_key]
+                        conflicting_texts.add(dedup_key)
+                        conflicting_records_dropped += 2
                 else:
                     record_id = hashlib.sha256(f"{subtype_id}\0{text_simplified}".encode()).hexdigest()
                     records_by_text[dedup_key] = {
@@ -173,6 +179,8 @@ def prepare_chifraud_dataset(
         "deduplicated_records": len(records),
         "split_id_sha256": split_id_sha256,
         "duplicate_records": raw_records - len(records),
+        "conflicting_texts": len(conflicting_texts),
+        "conflicting_records_dropped": conflicting_records_dropped,
         "counts": [
             {"year": year, "split": split, "subtype": subtype, "count": count}
             for (year, split, subtype), count in sorted(counts.items())

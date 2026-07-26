@@ -77,6 +77,29 @@ def test_prepare_chifraud_dataset_accepts_official_file_header(tmp_path) -> None
     assert all(record["text_simplified"] != "Text" for record in records)
 
 
+def test_prepare_chifraud_dataset_drops_all_conflicting_labels(tmp_path) -> None:
+    source = tmp_path / "dataset"
+    source.mkdir()
+    _write_rows(source / "ChiFraud_train.csv", "train")
+    _write_rows(source / "ChiFraud_t2022.csv", "test2022")
+    _write_rows(source / "ChiFraud_t2023.csv", "test2023")
+    _write_classes(source / "class.txt")
+    with (source / "ChiFraud_train.csv").open("a", encoding="utf-8") as handle:
+        handle.write("1\t同一筆衝突文字\n")
+    with (source / "ChiFraud_t2023.csv").open("a", encoding="utf-8") as handle:
+        handle.write("0\t同一筆衝突文字\n")
+
+    output = tmp_path / "prepared"
+    manifest = prepare_chifraud_dataset(source, output, source_revision="fixture-v1", seed=42)
+
+    records = [json.loads(line) for line in (output / "records.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert manifest["raw_records"] == 62
+    assert manifest["deduplicated_records"] == 60
+    assert manifest["conflicting_texts"] == 1
+    assert manifest["conflicting_records_dropped"] == 2
+
+    assert all(record["text_simplified"] != "同一筆衝突文字" for record in records)
+
 def test_prepare_chifraud_dataset_rejects_incomplete_class_list(tmp_path) -> None:
     source = tmp_path / "dataset"
     source.mkdir()
