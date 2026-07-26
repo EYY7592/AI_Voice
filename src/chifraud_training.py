@@ -10,6 +10,9 @@ from typing import Mapping, Sequence
 from statistics import fmean, pstdev
 
 
+def _as_cpu_rng_states(states):
+    return [state.cpu() for state in states]
+
 def compute_sampling_weights(
     records: Sequence[Mapping[str, object]], *, subtype_weight_cap: float = 4.0
 ) -> list[float]:
@@ -388,7 +391,7 @@ def train_candidate(
         source_best = resume_path.parent / "best_checkpoint"
         torch.set_rng_state(state["torch_rng_state"].cpu())
         if mixed_precision and state["cuda_rng_state"] is not None:
-            torch.cuda.set_rng_state_all(state["cuda_rng_state"])
+            torch.cuda.set_rng_state_all(_as_cpu_rng_states(state["cuda_rng_state"]))
         if source_best.is_dir():
             shutil.copytree(source_best, checkpoint_dir)
 

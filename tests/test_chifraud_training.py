@@ -5,6 +5,7 @@ from torch.nn import functional as F
 
 
 from src.chifraud_training import (
+    _as_cpu_rng_states,
     compute_sampling_weights,
     evaluate_candidate,
     evaluate_candidate_artifact,
@@ -13,6 +14,13 @@ from src.chifraud_training import (
     select_script_candidate,
     select_operating_thresholds,
 )
+
+
+def test_cuda_rng_states_are_restored_as_cpu_byte_tensors() -> None:
+    states = _as_cpu_rng_states([torch.tensor([1, 2], dtype=torch.uint8)])
+
+    assert states[0].device.type == "cpu"
+    assert states[0].dtype == torch.uint8
 
 
 def test_sampling_weights_balance_classes_and_mildly_boost_rare_subtypes() -> None:
