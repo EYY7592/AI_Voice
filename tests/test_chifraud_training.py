@@ -128,10 +128,73 @@ def test_train_candidate_runs_tiny_end_to_end_experiment(tmp_path) -> None:
 
     manifest = train_candidate(prepared, tmp_path / "candidate", base_model=base_model, max_epochs=1, batch_size=4, max_length=16)
     assert manifest["epochs_ran"] == 1
+    assert manifest["dynamic_padding"] is True
+    assert manifest["mixed_precision"] is False
     assert manifest["test_used_for_selection"] is False
     assert manifest["status"] in {"passed", "failed"}
     assert (tmp_path / "candidate" / "training_manifest.json").is_file()
 
+
+
+def test_train_candidate_resumes_from_a_step_checkpoint(tmp_path) -> None:
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    records = []
+    for split in ("train", "validation", "test"):
+        for year in (2022, 2023):
+            for label, text in ((0, "正常天氣"), (1, "詐騙匯款")):
+                for index in range(2):
+                    records.append(
+                        {
+                            "record_id": f"{split}-{year}-{label}-{index}",
+                            "year": year,
+                            "subtype_id": label,
+                            "subtype": "Normal" if label == 0 else "Gambling",
+                            "binary_label": label,
+                            "split": split,
+                            "text_simplified": f"{text}{index}",
+                            "text_traditional": f"{text}{index}",
+                        }
+                    )
+    (prepared / "records.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    (prepared / "manifest.json").write_text(
+        json.dumps({"source_revision": "fixture-v1"}),
+        encoding="utf-8",
+    )
+    base_model = tmp_path / "tiny-bert"
+    _write_tiny_bert(base_model)
+
+    paused = train_candidate(
+        prepared,
+        tmp_path / "paused",
+        base_model=base_model,
+        max_epochs=1,
+        batch_size=4,
+        max_length=16,
+        checkpoint_interval_steps=1,
+        max_steps=1,
+    )
+    checkpoint = tmp_path / "paused" / "progress_checkpoint.pt"
+    assert paused["status"] == "paused"
+    assert paused["steps_completed"] == 1
+    assert checkpoint.is_file()
+
+    resumed = train_candidate(
+        prepared,
+        tmp_path / "resumed",
+        base_model=base_model,
+        max_epochs=1,
+        batch_size=4,
+        max_length=16,
+        checkpoint_interval_steps=1,
+        resume_checkpoint=checkpoint,
+    )
+    assert resumed["resumed_from_step"] == 1
+    assert resumed["epochs_ran"] == 1
+    assert resumed["status"] in {"passed", "failed"}
 
 
 def test_equivalent_first_seed_requests_two_additional_seeds() -> None:

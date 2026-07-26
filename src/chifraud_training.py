@@ -205,20 +205,30 @@ def train_candidate(
     max_length: int = 256,
     learning_rate: float = 2e-5,
     device: str | None = None,
+    checkpoint_interval_steps: int = 500,
+    resume_checkpoint: str | PathLike[str] | None = None,
+    max_steps: int | None = None,
 ) -> dict[str, object]:
     """從 prepared records 訓練、校準並驗收一個候選模型。"""
     import json
     from pathlib import Path
+    import os
+    import shutil
+    import time
 
     import torch
     from torch.nn import functional as functional
     from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
-    from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_linear_schedule_with_warmup
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding, get_linear_schedule_with_warmup
 
     if script_view not in {"simplified", "traditional"}:
         raise ValueError("script_view 必須是 simplified 或 traditional。")
     if not 1 <= max_epochs <= 12 or patience < 1:
         raise ValueError("epochs 必須介於 1–12，且 patience 至少為 1。")
+    if checkpoint_interval_steps < 1:
+        raise ValueError("checkpoint_interval_steps 至少為 1。")
+    if max_steps is not None and max_steps < 1:
+        raise ValueError("max_steps 至少為 1。")
     prepared = Path(prepared_dir)
     output = Path(output_dir)
     if output.exists() and any(output.iterdir()):
@@ -258,10 +268,9 @@ def train_candidate(
                 [str(row[text_key]) for row in rows],
                 max_length=max_length,
                 truncation=True,
-                padding=True,
-                return_tensors="pt",
+                padding=False,
             )
-            self.labels = torch.tensor([int(row["binary_label"]) for row in rows], dtype=torch.long)
+            self.labels = [int(row["binary_label"]) for row in rows]
 
         def __len__(self) -> int:
             return len(self.labels)
@@ -273,22 +282,39 @@ def train_candidate(
 
     train_records = splits["train"]
     train_dataset = EncodedRecords(train_records)
-    generator = torch.Generator().manual_seed(seed)
-    sampler = WeightedRandomSampler(
-        compute_sampling_weights(train_records),
-        num_samples=3 * sum(int(record["binary_label"]) == 1 for record in train_records),
-        replacement=True,
-        generator=generator,
+    sampling_weights = compute_sampling_weights(train_records)
+    samples_per_epoch = 3 * sum(int(record["binary_label"]) == 1 for record in train_records)
+    collator = DataCollatorWithPadding(
+        tokenizer,
+        padding=True,
+        pad_to_multiple_of=8 if selected_device.startswith("cuda") else None,
+        return_tensors="pt",
     )
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler)
-    validation_loader = DataLoader(EncodedRecords(splits["validation"]), batch_size=batch_size)
-    test_loader = DataLoader(EncodedRecords(splits["test"]), batch_size=batch_size)
+
+    def make_train_loader(epoch: int) -> DataLoader:
+        sampler = WeightedRandomSampler(
+            sampling_weights,
+            num_samples=samples_per_epoch,
+            replacement=True,
+            generator=torch.Generator().manual_seed(seed + epoch),
+        )
+        return DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, collate_fn=collator)
+
+    validation_loader = DataLoader(EncodedRecords(splits["validation"]), batch_size=batch_size, collate_fn=collator)
+    test_loader = DataLoader(EncodedRecords(splits["test"]), batch_size=batch_size, collate_fn=collator)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
-    total_steps = max_epochs * len(train_loader)
+    steps_per_epoch = math.ceil(samples_per_epoch / batch_size)
+    total_steps = max_epochs * steps_per_epoch
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=max(1, int(total_steps * 0.1)),
         num_training_steps=total_steps,
+    )
+    mixed_precision = selected_device.startswith("cuda")
+    scaler = (
+        torch.amp.GradScaler("cuda", enabled=mixed_precision)
+        if hasattr(torch.amp, "GradScaler")
+        else torch.cuda.amp.GradScaler(enabled=mixed_precision)
     )
 
     def collect(loader: DataLoader) -> tuple[torch.Tensor, torch.Tensor, float]:
@@ -299,7 +325,8 @@ def train_candidate(
         with torch.no_grad():
             for batch in loader:
                 labels = batch.pop("labels").to(selected_device)
-                logits = model(**{name: value.to(selected_device) for name, value in batch.items()}).logits
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=mixed_precision):
+                    logits = model(**{name: value.to(selected_device) for name, value in batch.items()}).logits
                 losses.append(float(functional.cross_entropy(logits, labels)))
                 all_logits.append(logits.cpu())
                 all_labels.append(labels.cpu())
@@ -322,18 +349,129 @@ def train_candidate(
     best_epoch = 0
     stale_epochs = 0
     checkpoint_dir = output / "best_checkpoint"
-    for epoch in range(1, max_epochs + 1):
+    progress_path = output / "progress_checkpoint.pt"
+    start_epoch = 1
+    start_step = 0
+    global_step = 0
+    resumed_from_step = 0
+    resumed_epoch_loss_sum = 0.0
+    resumed_epoch_loss_count = 0
+
+    if resume_checkpoint is not None:
+        resume_path = Path(resume_checkpoint)
+        state = torch.load(resume_path, map_location=selected_device, weights_only=False)
+        expected = {
+            "script_view": script_view,
+            "seed": seed,
+            "base_revision": base_revision,
+            "max_epochs": max_epochs,
+            "batch_size": batch_size,
+            "max_length": max_length,
+        }
+        for field, value in expected.items():
+            if state.get(field) != value:
+                raise ValueError(f"resume checkpoint 的 {field} 不相容。")
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        scaler.load_state_dict(state["scaler"])
+        start_epoch = int(state["epoch"])
+        start_step = int(state["next_step"])
+        global_step = int(state["global_step"])
+        resumed_from_step = global_step
+        resumed_epoch_loss_sum = float(state["epoch_loss_sum"])
+        resumed_epoch_loss_count = int(state["epoch_loss_count"])
+        history = list(state["history"])
+        best_rank = state["best_rank"]
+        best_epoch = int(state["best_epoch"])
+        stale_epochs = int(state["stale_epochs"])
+        source_best = resume_path.parent / "best_checkpoint"
+        torch.set_rng_state(state["torch_rng_state"].cpu())
+        if mixed_precision and state["cuda_rng_state"] is not None:
+            torch.cuda.set_rng_state_all(state["cuda_rng_state"])
+        if source_best.is_dir():
+            shutil.copytree(source_best, checkpoint_dir)
+
+    def save_progress(
+        epoch: int,
+        next_step: int,
+        epoch_loss_sum: float,
+        epoch_loss_count: int,
+    ) -> None:
+        temporary_path = progress_path.with_suffix(".tmp")
+        torch.save(
+            {
+                "schema_version": 1,
+                "script_view": script_view,
+                "seed": seed,
+                "base_revision": base_revision,
+                "max_epochs": max_epochs,
+                "batch_size": batch_size,
+                "max_length": max_length,
+                "epoch": epoch,
+                "next_step": next_step,
+                "global_step": global_step,
+                "epoch_loss_sum": epoch_loss_sum,
+                "epoch_loss_count": epoch_loss_count,
+                "history": history,
+                "best_rank": best_rank,
+                "best_epoch": best_epoch,
+                "stale_epochs": stale_epochs,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "torch_rng_state": torch.get_rng_state(),
+                "cuda_rng_state": torch.cuda.get_rng_state_all() if mixed_precision else None,
+                "scaler": scaler.state_dict(),
+            },
+            temporary_path,
+        )
+        os.replace(temporary_path, progress_path)
+
+    training_started = time.perf_counter()
+    for epoch in range(start_epoch, max_epochs + 1):
         model.train()
-        train_losses: list[float] = []
-        for batch in train_loader:
+        epoch_loss_sum = resumed_epoch_loss_sum if epoch == start_epoch else 0.0
+        epoch_loss_count = resumed_epoch_loss_count if epoch == start_epoch else 0
+        train_loader = make_train_loader(epoch)
+        for step_index, batch in enumerate(train_loader):
+            if epoch == start_epoch and step_index < start_step:
+                continue
             labels = batch.pop("labels").to(selected_device)
-            optimizer.zero_grad()
-            logits = model(**{name: value.to(selected_device) for name, value in batch.items()}).logits
-            loss = functional.cross_entropy(logits, labels)
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=mixed_precision):
+                logits = model(**{name: value.to(selected_device) for name, value in batch.items()}).logits
+                loss = functional.cross_entropy(logits, labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
-            train_losses.append(float(loss.detach()))
+            loss_value = float(loss.detach())
+            epoch_loss_sum += loss_value
+            epoch_loss_count += 1
+            global_step += 1
+            next_step = step_index + 1
+            if global_step % checkpoint_interval_steps == 0:
+                save_progress(epoch, next_step, epoch_loss_sum, epoch_loss_count)
+            if max_steps is not None and global_step >= max_steps:
+                save_progress(epoch, next_step, epoch_loss_sum, epoch_loss_count)
+                elapsed_seconds = max(time.perf_counter() - training_started, 1e-9)
+                completed_this_run = global_step - resumed_from_step
+                progress_manifest = {
+                    "status": "paused",
+                    "script_view": script_view,
+                    "steps_completed": global_step,
+                    "steps_per_epoch": steps_per_epoch,
+                    "total_steps": total_steps,
+                    "steps_per_second": completed_this_run / elapsed_seconds,
+                    "estimated_total_hours": total_steps / (completed_this_run / elapsed_seconds) / 3600,
+                    "checkpoint": progress_path.name,
+                }
+                (output / "progress_manifest.json").write_text(
+                    json.dumps(progress_manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                return progress_manifest
         validation_logits, validation_labels, validation_loss = collect(validation_loader)
         temperature = fit_temperature(validation_logits, validation_labels)
         validation_records = calibrated_records(splits["validation"], validation_logits, temperature)
@@ -350,7 +488,7 @@ def train_candidate(
         history.append(
             {
                 "epoch": epoch,
-                "train_loss": sum(train_losses) / len(train_losses),
+                "train_loss": epoch_loss_sum / epoch_loss_count,
                 "validation_loss": validation_loss,
                 "eligible_thresholds": eligible,
                 "fraud_recall": metrics["fraud_recall"] if metrics is not None else None,
@@ -366,8 +504,9 @@ def train_candidate(
             tokenizer.save_pretrained(checkpoint_dir)
         else:
             stale_epochs += 1
-            if stale_epochs >= patience:
-                break
+        save_progress(epoch + 1, 0, 0.0, 0)
+        if stale_epochs >= patience:
+            break
 
     model = AutoModelForSequenceClassification.from_pretrained(checkpoint_dir, local_files_only=True).to(selected_device)
     validation_logits, validation_labels, _ = collect(validation_loader)
@@ -420,6 +559,13 @@ def train_candidate(
         "epochs_ran": len(history),
         "best_epoch": best_epoch,
         "batch_size": batch_size,
+        "dynamic_padding": True,
+        "mixed_precision": mixed_precision,
+        "checkpoint_interval_steps": checkpoint_interval_steps,
+        "resumed_from_step": resumed_from_step,
+        "steps_completed": global_step,
+        "steps_per_epoch": steps_per_epoch,
+        "total_steps": total_steps,
         "max_length": max_length,
         "learning_rate": learning_rate,
         "label_mapping": {"NORMAL": 0, "FRAUD": 1},
@@ -444,6 +590,7 @@ def train_candidate(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    progress_path.unlink(missing_ok=True)
     return manifest
 
 
