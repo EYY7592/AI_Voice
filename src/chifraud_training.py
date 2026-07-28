@@ -43,8 +43,13 @@ def compute_sampling_weights(
 
 def select_operating_thresholds(
     records: Sequence[Mapping[str, object]],
+    *,
+    medium_fpr_limit: float = 0.10,
+    high_fpr_limit: float = 0.03,
 ) -> dict[str, float]:
     """在每年度正常誤報護欄內，選擇詐騙 Recall 最高的中／高門檻。"""
+    if not 0 < high_fpr_limit < medium_fpr_limit < 1:
+        raise ValueError("門檻校準的 FPR 限制必須滿足 0 < high < medium < 1。")
     normalized = [
         {
             "year": int(record["year"]),
@@ -75,13 +80,13 @@ def select_operating_thresholds(
                 return False
         return True
 
-    medium_candidates = [threshold for threshold in candidates if within_fpr(threshold, 0.10)]
+    medium_candidates = [threshold for threshold in candidates if within_fpr(threshold, medium_fpr_limit)]
     if not medium_candidates:
-        raise ValueError("找不到符合兩年度 10% 正常誤報護欄的中風險門檻。")
+        raise ValueError("找不到符合兩年度正常誤報護欄的中風險門檻。")
     medium = max(medium_candidates, key=lambda threshold: (recall(threshold), -threshold))
-    high_candidates = [threshold for threshold in candidates if threshold > medium and within_fpr(threshold, 0.03)]
+    high_candidates = [threshold for threshold in candidates if threshold > medium and within_fpr(threshold, high_fpr_limit)]
     if not high_candidates:
-        raise ValueError("找不到符合兩年度 3% 正常誤報護欄的高風險門檻。")
+        raise ValueError("找不到符合兩年度正常誤報護欄的高風險門檻。")
     high = max(high_candidates, key=lambda threshold: (recall(threshold), -threshold))
     return {"medium_threshold": medium, "high_threshold": high}
 
@@ -679,6 +684,124 @@ def select_script_candidate(results: Sequence[Mapping[str, object]]) -> dict[str
         "comparison_summary": comparison_summary,
     }
 
+
+def recalibrate_candidate_artifact(
+    model_dir: str | PathLike[str],
+    prepared_dir: str | PathLike[str],
+    output_dir: str | PathLike[str],
+    *,
+    script_view: str,
+    batch_size: int = 64,
+    max_length: int = 256,
+    device: str | None = None,
+    medium_fpr_limit: float = 0.08,
+    high_fpr_limit: float = 0.03,
+) -> dict[str, object]:
+    """只用 validation 重算既有模型校準值，BERT 權重保持不變。"""
+    import json
+    from pathlib import Path
+    import shutil
+
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    if script_view not in {"simplified", "traditional"}:
+        raise ValueError("script_view 必須是 simplified 或 traditional。")
+    model_path = Path(model_dir)
+    prepared = Path(prepared_dir)
+    output = Path(output_dir)
+    if output.exists():
+        raise FileExistsError(f"recalibration 輸出目錄已存在：{output}")
+    weight_paths = sorted(model_path.glob("*.safetensors")) or sorted(model_path.glob("pytorch_model*.bin"))
+    if not weight_paths:
+        raise FileNotFoundError("candidate model 缺少 BERT 權重檔。")
+
+    rows = [
+        json.loads(line)
+        for line in (prepared / "records.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    rows = [row for row in rows if row["split"] == "validation"]
+    if not rows:
+        raise ValueError("prepared records 缺少 validation split。")
+
+    selected_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    model = AutoModelForSequenceClassification.from_pretrained(model_path, local_files_only=True).to(selected_device)
+    id2label = {int(key): str(value).upper() for key, value in model.config.id2label.items()}
+    label2id = {str(key).upper(): int(value) for key, value in model.config.label2id.items()}
+    if id2label != {0: "NORMAL", 1: "FRAUD"} or label2id != {"NORMAL": 0, "FRAUD": 1}:
+        raise ValueError("BERT 模型標籤契約必須是 0=NORMAL、1=FRAUD。")
+
+    text_key = "text_simplified" if script_view == "simplified" else "text_traditional"
+    logits_parts: list[torch.Tensor] = []
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start + batch_size]
+            encoded = tokenizer(
+                [str(row[text_key]) for row in batch],
+                max_length=max_length,
+                truncation=True,
+                padding=True,
+                return_tensors="pt",
+            )
+            logits_parts.append(
+                model(**{name: value.to(selected_device) for name, value in encoded.items()}).logits.cpu()
+            )
+    logits = torch.cat(logits_parts)
+    labels = torch.tensor([int(row["binary_label"]) for row in rows])
+    temperature = fit_temperature(logits, labels)
+    probabilities = torch.softmax(logits / temperature, dim=-1)[:, 1].tolist()
+    validation_records = [
+        {
+            "year": int(row["year"]),
+            "label": int(row["binary_label"]),
+            "probability": float(probability),
+        }
+        for row, probability in zip(rows, probabilities)
+    ]
+    thresholds = select_operating_thresholds(
+        validation_records,
+        medium_fpr_limit=medium_fpr_limit,
+        high_fpr_limit=high_fpr_limit,
+    )
+
+    def sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    before = {path.name: sha256_file(path) for path in weight_paths}
+    shutil.copytree(model_path, output)
+    model.config.scamlens_calibration = {"temperature": temperature, **thresholds}
+    model.config.scamlens_script_view = script_view
+    model.config.save_pretrained(output)
+    after = {path.name: sha256_file(output / path.name) for path in weight_paths}
+    if before != after:
+        raise RuntimeError("重新校準不得改變 BERT 權重。")
+
+    manifest = {
+        "status": "passed",
+        "script_view": script_view,
+        "validation_samples": len(rows),
+        "test_used_for_calibration": False,
+        "calibration": model.config.scamlens_calibration,
+        "validation_fpr_limits": {"medium": medium_fpr_limit, "high": high_fpr_limit},
+        "weights_sha256_before": next(iter(before.values())),
+        "weights_sha256_after": next(iter(after.values())),
+        "weight_artifacts": [
+            {"path": name, "sha256": digest}
+            for name, digest in before.items()
+        ],
+    }
+    (output / "recalibration_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
 
 def evaluate_candidate_artifact(
     model_dir: str | PathLike[str],

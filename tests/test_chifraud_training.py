@@ -10,6 +10,7 @@ from src.chifraud_training import (
     evaluate_candidate,
     evaluate_candidate_artifact,
     fit_temperature,
+    recalibrate_candidate_artifact,
     train_candidate,
     select_script_candidate,
     select_operating_thresholds,
@@ -281,3 +282,90 @@ def test_candidate_artifact_can_be_evaluated_on_a_script_view(tmp_path) -> None:
 
     report = evaluate_candidate_artifact(model_dir, prepared, script_view="traditional", batch_size=2)
     assert set(report["years"]) == {"2022", "2023"}
+
+
+def test_candidate_artifact_recalibration_uses_validation_without_changing_weights(
+    tmp_path, monkeypatch
+) -> None:
+    from hashlib import sha256
+    from types import SimpleNamespace
+
+    class FakeTokenizer:
+        def __call__(self, texts, **kwargs):
+            values = [2 if "高" in text else 1 if "詐" in text else 0 for text in texts]
+            return {"input_ids": torch.tensor(values).unsqueeze(1)}
+
+    class FakeConfig:
+        id2label = {0: "NORMAL", 1: "FRAUD"}
+        label2id = {"NORMAL": 0, "FRAUD": 1}
+
+        def save_pretrained(self, path):
+            (path / "config.json").write_text(
+                json.dumps({"scamlens_calibration": self.scamlens_calibration}),
+                encoding="utf-8",
+            )
+
+    class FakeModel:
+        def __init__(self):
+            self.config = FakeConfig()
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+        def __call__(self, input_ids):
+            logits = torch.tensor([[3.0, 0.0], [0.0, 2.0], [0.0, 3.0]])
+            return SimpleNamespace(logits=logits[input_ids.squeeze(1)])
+
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained",
+        lambda *args, **kwargs: FakeTokenizer(),
+    )
+    monkeypatch.setattr(
+        "transformers.AutoModelForSequenceClassification.from_pretrained",
+        lambda *args, **kwargs: FakeModel(),
+    )
+
+    model_dir = tmp_path / "candidate-model"
+    model_dir.mkdir()
+    weights = b"unchanged bert weights"
+    (model_dir / "model.safetensors").write_bytes(weights)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    records = []
+    for split in ("validation", "test"):
+        for year in (2022, 2023):
+            for text, label in (("正常", 0), ("詐騙", 1), ("高風險詐騙", 1)):
+                records.append(
+                    {
+                        "year": year,
+                        "binary_label": label,
+                        "subtype_id": label,
+                        "split": split,
+                        "text_simplified": text,
+                        "text_traditional": text,
+                    }
+                )
+    (prepared / "records.jsonl").write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    output = tmp_path / "recalibrated"
+    manifest = recalibrate_candidate_artifact(
+        model_dir,
+        prepared,
+        output,
+        script_view="traditional",
+        batch_size=3,
+    )
+
+    expected_hash = sha256(weights).hexdigest()
+    assert manifest["test_used_for_calibration"] is False
+    assert manifest["validation_samples"] == 6
+    assert manifest["weights_sha256_before"] == expected_hash
+    assert manifest["weights_sha256_after"] == expected_hash
+    assert (output / "model.safetensors").read_bytes() == weights
